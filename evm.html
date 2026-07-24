@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <title>NexVault · EVM Swap</title>
+    <link rel="icon" type="image/png" href="/nexvault-app/icon.png" />
+    <style>
+      :root { --bg:#080810; --card:#14141f; --text:#e8e8f4; --muted:#9a9ab0; --purple:#8b7bfd; --line:rgba(255,255,255,.08); }
+      * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+      html,body { margin:0; padding:0; background:var(--bg); color:var(--text); min-height:100vh; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+      .wrap { max-width:460px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px; text-align:center; }
+      .logo { font-size:22px; font-weight:800; letter-spacing:.5px; margin-bottom:6px; }
+      .logo span { background:linear-gradient(90deg,#8b7bfd,#3aa0ff); -webkit-background-clip:text; background-clip:text; color:transparent; }
+      .sub { color:var(--muted); font-size:13px; margin-bottom:26px; }
+      .card { width:100%; background:var(--card); border:1px solid var(--line); border-radius:18px; padding:24px 20px; }
+      .spinner { width:38px; height:38px; margin:0 auto 16px; border:3px solid rgba(255,255,255,.15); border-top-color:var(--purple); border-radius:50%; animation:spin .8s linear infinite; }
+      @keyframes spin { to { transform:rotate(360deg); } }
+      .status { font-size:16px; font-weight:700; margin-bottom:8px; }
+      .detail { color:var(--muted); font-size:12.5px; line-height:1.55; }
+      .ok { color:#7ee0a1; } .err { color:#ff7a7a; }
+      .quote { margin-top:16px; text-align:left; border:1px solid var(--line); border-radius:12px; padding:12px 14px; background:rgba(0,0,0,.25); }
+      .quote-row { display:flex; justify-content:space-between; font-size:13px; padding:4px 0; }
+      .quote-row .k { color:var(--muted); } .quote-row .v { font-weight:600; }
+      .quote-recv { color:#8b7bfd; font-weight:700; }
+      .note { color:var(--muted); font-size:11px; margin-top:10px; line-height:1.5; }
+      .btn { display:block; width:100%; margin-top:16px; padding:15px; border:none; border-radius:14px; font-size:15px; font-weight:700; cursor:pointer; color:#fff; background:linear-gradient(90deg,#7b5bfd,#3aa0ff); text-align:center; text-decoration:none; }
+      .btn.secondary { background:rgba(255,255,255,.06); border:1px solid var(--line); color:var(--text); }
+      .btn[disabled] { opacity:.5; pointer-events:none; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="logo">Nex<span>Vault</span></div>
+      <div class="sub" id="sub">EVM Swap</div>
+      <div class="card" id="card">
+        <div class="spinner" id="spinner"></div>
+        <div class="status" id="status">Starting…</div>
+        <div class="detail" id="detail"></div>
+      </div>
+    </div>
+
+    <script type="module">
+      /* ╔═══════════════════════════════════════════════════════════════════════════╗
+         ║ NexVault EVM SWAP ENGINE — standalone, like sol.html.                       ║
+         ║                                                                           ║
+         ║ TWO transports, ONE swap path (both expose .request()):                    ║
+         ║  • INJECTED  — when opened inside a wallet's own dApp browser              ║
+         ║    (window.ethereum). Prompts show INLINE, 100% reliable.                  ║
+         ║  • WALLETCONNECT — the OFFICIAL @walletconnect/ethereum-provider with its  ║
+         ║    modal. It handles every wallet's deep-link format AND the request       ║
+         ║    redirect that surfaces prompts — the parts we previously hand-rolled    ║
+         ║    with raw SignClient and got wrong (Bitget/Kucoin didn't surface the tx).║
+         ║                                                                           ║
+         ║ Runs on a normal browser tab, which survives wallet round-trips (unlike    ║
+         ║ the Telegram Mini App WebView). Returns to Telegram only at the end.       ║
+         ║ Fee = Li.Fi integrator fee (nexvault-1, 0.5%).                             ║
+         ╚═══════════════════════════════════════════════════════════════════════════╝ */
+
+      var BASE = "https://ruleworldc.github.io/nexvault-app";
+      var TG   = "https://t.me/TheNexVaultBot?startapp=home";
+      var WC_PROJECT_ID = "fac6a805240f9a1502dec565d2e5080d";
+      var LIFI = "https://li.quest/v1/quote";
+      var INTEGRATOR = "nexvault-1";
+      var FEE = "0.005";
+      var NATIVE = ["0x0000000000000000000000000000000000000000","0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"];
+      var EVM_CHAINS = [1,10,56,137,8453,42161,43114];
+      var BUILD = "evm-b125";
+
+      var params = new URLSearchParams(location.search);
+      var P = {
+        scheme: params.get("scheme") || "",
+        name:   params.get("name")   || "your wallet",
+        from:   parseInt(params.get("from") || "0", 10),
+        to:     parseInt(params.get("to")   || "0", 10),
+        ftok:   params.get("ftok") || "",
+        ttok:   params.get("ttok") || "",
+        fdec:   parseInt(params.get("fdec") || "18", 10),
+        amt:    params.get("amt") || "",
+        rcpt:   params.get("rcpt") || "",
+        slip:   params.get("slip") || "0.005",
+        fsym:   params.get("fsym") || "token",
+        tsym:   params.get("tsym") || "token",
+      };
+
+      var elStatus = document.getElementById("status");
+      var elDetail = document.getElementById("detail");
+      var elCard   = document.getElementById("card");
+      var elSpin   = document.getElementById("spinner");
+      var elSub    = document.getElementById("sub");
+
+      var _dbg = document.createElement("div");
+      _dbg.style.cssText = "position:fixed;left:0;right:0;bottom:0;background:rgba(0,0,0,.88);color:#7ee0a1;font:10px/1.4 ui-monospace,monospace;padding:4px 7px;white-space:pre-wrap;word-break:break-all;z-index:99999;";
+      function setDbg(s) { try { _dbg.textContent = BUILD + " | " + s; } catch (e) {} }
+      try { document.body.appendChild(_dbg); setDbg("loading…"); } catch (e) {}
+
+      function show(title, detail, cls, spin) {
+        elSpin.style.display = spin ? "block" : "none";
+        elStatus.textContent = title;
+        elStatus.className = "status" + (cls ? " " + cls : "");
+        elDetail.innerHTML = detail || "";
+        while (elCard.children.length > 3) elCard.removeChild(elCard.lastChild);
+      }
+      function addButton(label, onClick, secondary) {
+        var b = document.createElement("button");
+        b.className = "btn" + (secondary ? " secondary" : "");
+        b.textContent = label; b.onclick = onClick;
+        elCard.appendChild(b); return b;
+      }
+      function addLink(label, href) {
+        var a = document.createElement("a");
+        a.textContent = label; a.href = href; a.target = "_blank"; a.rel = "noopener";
+        a.style.cssText = "display:block;margin-top:12px;color:#8b7bfd;font-size:12px;";
+        elCard.appendChild(a); return a;
+      }
+      function backToTelegram() { try { window.location.replace(TG); } catch (e) { window.location.href = TG; } }
+
+      function friendly(raw) {
+        var m = String(raw || "").toLowerCase();
+        if (/reject|denied|cancel|user refused|4001/.test(m))  return { t:"Request cancelled", d:"You declined the request in your wallet. Tap Try again to retry." };
+        if (/insufficient|exceeds balance|not enough/.test(m)) return { t:"Not enough balance", d:"You don't have enough to cover the swap plus network gas. Try a smaller amount." };
+        if (/slippage|amount out|price impact/.test(m))        return { t:"Price moved too much", d:"The market moved beyond your slippage. Increase slippage and try again." };
+        if (/no route|not found|route|no available/.test(m))   return { t:"No route available", d:"No swap route for this pair right now. Try a different amount or token." };
+        if (/failed to fetch|network|timeout|load/.test(m))    return { t:"Network issue", d:"Couldn't reach the network. Check your connection and tap Try again." };
+        if (/chain|unsupported|4902/.test(m))                  return { t:"Wrong network", d:"Your wallet couldn't switch to the required network. Switch manually and retry." };
+        if (/session|pairing|expired|topic|connect/.test(m))   return { t:"Connection issue", d:"The wallet connection dropped. Tap Try again to reconnect." };
+        return { t:"Swap couldn't complete", d:"Something went wrong. Please try again." };
+      }
+      function showError(raw, retryFn) {
+        try { console.warn("[NexVault EVM]", String(raw || "")); } catch (e) {}
+        var f = friendly(raw);
+        show(f.t, f.d, "err", false);
+        if (retryFn) addButton("Try again", retryFn);
+        addButton("Back to Telegram", backToTelegram, true);
+        var lnk = document.createElement("div");
+        lnk.textContent = "Details";
+        lnk.style.cssText = "color:#667;font-size:11px;margin-top:16px;text-align:center;text-decoration:underline;";
+        var body = document.createElement("div");
+        body.style.cssText = "display:none;color:#8a8a9a;font-size:10px;margin-top:8px;word-break:break-all;line-height:1.45;background:rgba(255,255,255,.04);border-radius:8px;padding:8px 10px;text-align:left;";
+        body.textContent = String(raw || "(no detail)").slice(0, 400);
+        lnk.onclick = function () { body.style.display = (body.style.display === "none" ? "block" : "none"); };
+        elCard.appendChild(lnk); elCard.appendChild(body);
+      }
+
+      function isNativeTok(a) { return !a || NATIVE.indexOf(String(a).toLowerCase()) >= 0; }
+      function toBaseUnits(amount, decimals) {
+        var s = String(amount); if (s[0] === "-") s = s.slice(1);
+        var parts = s.split("."); var whole = parts[0] || "0"; var frac = parts[1] || "";
+        frac = (frac + "0".repeat(decimals)).slice(0, decimals);
+        return (whole + frac).replace(/^0+/, "") || "0";
+      }
+      function chainHex(id) { return "0x" + id.toString(16); }
+      function toHex(v) { var s = String(v); if (/^0x/i.test(s)) return s; try { return "0x" + BigInt(s).toString(16); } catch (e) { return "0x0"; } }
+      function pad32(addr) { return "0".repeat(24) + String(addr).replace(/^0x/, "").toLowerCase(); }
+      function chainName(id) { var m={1:"Ethereum",10:"Optimism",56:"BNB Chain",137:"Polygon",8453:"Base",42161:"Arbitrum",43114:"Avalanche"}; return m[id]||("chain "+id); }
+      function explorerTx(id, hash) {
+        var m={1:"https://etherscan.io/tx/",10:"https://optimistic.etherscan.io/tx/",56:"https://bscscan.com/tx/",137:"https://polygonscan.com/tx/",8453:"https://basescan.org/tx/",42161:"https://arbiscan.io/tx/",43114:"https://snowtrace.io/tx/"};
+        return (m[id]||"https://blockscan.com/tx/") + hash;
+      }
+      function chainAddParams(id) {
+        var C = {
+          56:  { chainId:"0x38", chainName:"BNB Chain", nativeCurrency:{name:"BNB",symbol:"BNB",decimals:18}, rpcUrls:["https://bsc-dataseed.binance.org"], blockExplorerUrls:["https://bscscan.com"] },
+          137: { chainId:"0x89", chainName:"Polygon", nativeCurrency:{name:"POL",symbol:"POL",decimals:18}, rpcUrls:["https://polygon-rpc.com"], blockExplorerUrls:["https://polygonscan.com"] },
+          42161:{ chainId:"0xa4b1", chainName:"Arbitrum One", nativeCurrency:{name:"ETH",symbol:"ETH",decimals:18}, rpcUrls:["https://arb1.arbitrum.io/rpc"], blockExplorerUrls:["https://arbiscan.io"] },
+          10:  { chainId:"0xa", chainName:"Optimism", nativeCurrency:{name:"ETH",symbol:"ETH",decimals:18}, rpcUrls:["https://mainnet.optimism.io"], blockExplorerUrls:["https://optimistic.etherscan.io"] },
+          8453:{ chainId:"0x2105", chainName:"Base", nativeCurrency:{name:"ETH",symbol:"ETH",decimals:18}, rpcUrls:["https://mainnet.base.org"], blockExplorerUrls:["https://basescan.org"] },
+          43114:{ chainId:"0xa86a", chainName:"Avalanche", nativeCurrency:{name:"AVAX",symbol:"AVAX",decimals:18}, rpcUrls:["https://api.avax.network/ext/bc/C/rpc"], blockExplorerUrls:["https://snowtrace.io"] },
+        };
+        return C[id] || { chainId: chainHex(id) };
+      }
+
+      if (!P.from || !P.to || !P.ftok || !P.ttok || !P.amt) {
+        show("Nothing to swap", "This page was opened without swap details. Return to NexVault and start again.", "err", false);
+        addButton("Back to Telegram", backToTelegram);
+        throw new Error("missing params");
+      }
+
+      // provider = the active EIP-1193 provider (injected OR WalletConnect). Both have
+      // .request(); the swap flow doesn't care which it is.
+      var provider = null;
+      var account = "";
+
+      async function loadWcProvider() {
+        var cdns = [
+          "https://esm.sh/@walletconnect/ethereum-provider@2.21.0",
+          "https://cdn.jsdelivr.net/npm/@walletconnect/ethereum-provider@2.21.0/+esm",
+        ];
+        var lastErr = null;
+        for (var i = 0; i < cdns.length; i++) {
+          try { var m = await import(cdns[i]); return m.EthereumProvider || (m.default && m.default.EthereumProvider) || m.default; }
+          catch (e) { lastErr = e; }
+        }
+        throw lastErr || new Error("Could not load wallet library");
+      }
+
+      // ── CONNECT ────────────────────────────────────────────────────────────────
+      async function start() {
+        // A) Injected: inside a wallet's own dApp browser → most reliable.
+        var eth = window.ethereum || (window.bitkeep && window.bitkeep.ethereum) || window.okxwallet;
+        if (eth && eth.request) {
+          setDbg("injected provider · connecting");
+          provider = eth;
+          show("Connecting…", "Approve the connection in your wallet.", "", true);
+          try { var a = await eth.request({ method: "eth_requestAccounts" }); account = a && a[0]; }
+          catch (e) { showError((e && e.message) || e, start); return; }
+          if (!account) { showError("wallet returned no address", start); return; }
+          await ensureChain();
+          setDbg("injected connected " + account.slice(0,6) + " on eip155:" + P.from);
+          return quoteAndRender();
+        }
+
+        // B) WalletConnect — official EthereumProvider + modal handles all wallets.
+        setDbg("loading WalletConnect…");
+        show("Loading…", "Preparing your wallet connection.", "", true);
+        var EP;
+        try { EP = await loadWcProvider(); }
+        catch (e) { showError("Couldn't load the wallet library. Check your connection and try again.", start); return; }
+        try {
+          provider = await EP.init({
+            projectId: WC_PROJECT_ID,
+            chains: [P.from],              // require the swap chain → tx signs directly
+            optionalChains: EVM_CHAINS,
+            showQrModal: true,             // official modal: wallet list + correct deep links
+            methods: ["eth_sendTransaction","personal_sign","eth_signTypedData","eth_signTypedData_v4","wallet_switchEthereumChain","wallet_addEthereumChain"],
+            events: ["chainChanged","accountsChanged"],
+            metadata: { name:"NexVault", description:"Cross-chain DEX", url:BASE+"/", icons:[BASE+"/icon.png"] },
+            qrModalOptions: { themeMode: "dark" },
+          });
+        } catch (e) { showError("init: " + ((e && e.message) || e), start); return; }
+
+        setDbg("WC ready · opening wallet picker");
+        show("Choose your wallet", "Pick your wallet to connect and swap.", "", true);
+        try {
+          // Timeout so a wallet that opens but never surfaces the WC prompt (some wallets
+          // only connect from their OWN in-app browser) doesn't hang forever.
+          await Promise.race([
+            provider.connect(),
+            new Promise(function (_, rej) { setTimeout(function () { rej(new Error("connect-timeout")); }, 45000); }),
+          ]);
+        } catch (e) {
+          if (String((e && e.message) || e).indexOf("connect-timeout") >= 0) { showWalletBrowserHelp(); return; }
+          showError((e && e.message) || e, start); return;
+        }
+
+        account = provider.accounts && provider.accounts[0];
+        if (!account) { showError("wallet returned no address", start); return; }
+        await ensureChain();
+        setDbg("WC connected " + account.slice(0,6) + " chain=" + provider.chainId);
+        quoteAndRender();
+      }
+
+      // Fallback for wallets that don't surface a WC prompt from an external browser
+      // (e.g. KuCoin). They DO have a built-in dApp browser where window.ethereum works
+      // (the injected path, proven with Bitget). So point the user there with this exact
+      // link — opening it inside the wallet's browser makes the swap work.
+      function showWalletBrowserHelp() {
+        var here = location.href;
+        show("Open in your wallet's browser",
+             "This wallet connects best from its OWN in-app browser. Open <b>" + P.name +
+             "</b>, go to its <b>Browser / Discover</b> tab, and open this page there — connect and swap will work.", "err", false);
+        var box = document.createElement("div");
+        box.style.cssText = "margin-top:14px;font-family:monospace;font-size:10.5px;background:rgba(0,0,0,.35);border:1px solid var(--line);border-radius:10px;padding:9px 11px;word-break:break-all;text-align:left;color:#9aa;";
+        box.textContent = here;
+        elCard.appendChild(box);
+        addButton("Copy link", function () {
+          try { navigator.clipboard.writeText(here); this.textContent = "Copied ✓"; } catch (e) {
+            try { var r = document.createRange(); r.selectNode(box); var s = getSelection(); s.removeAllRanges(); s.addRange(r); document.execCommand("copy"); this.textContent = "Copied ✓"; } catch (e2) {}
+          }
+        });
+        addButton("Try a different wallet", function () { location.reload(); }, true);
+        addButton("Back to NexVault", backToTelegram, true);
+      }
+
+      // Make sure the wallet is on the FROM chain. Both transports use .request().
+      async function ensureChain() {
+        try {
+          var cur = parseInt(await provider.request({ method: "eth_chainId" }), 16);
+          if (cur === P.from) return;
+          show("Switch to " + chainName(P.from), "Approve the network switch in your wallet.", "", true);
+          try { await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: chainHex(P.from) }] }); }
+          catch (e) {
+            try { await provider.request({ method: "wallet_addEthereumChain", params: [chainAddParams(P.from)] }); } catch (e2) {}
+          }
+        } catch (e) {}
+      }
+
+      // ── QUOTE (Li.Fi) ───────────────────────────────────────────────────────────
+      async function quoteAndRender() {
+        show("Fetching best price…", "Connected: " + account.slice(0,6) + "…" + account.slice(-4), "", true);
+        var q;
+        try { q = await getLifi(); }
+        catch (e) { showError((e && e.message) || e, quoteAndRender); return; }
+
+        var recv = (q.estimate && q.estimate.toAmount)
+          ? (Number(q.estimate.toAmount) / Math.pow(10, (q.action && q.action.toToken && q.action.toToken.decimals) || 18)) : 0;
+        show("Review your swap", "", "", false);
+        var box = document.createElement("div");
+        box.className = "quote";
+        box.innerHTML =
+          '<div class="quote-row"><span class="k">You pay</span><span class="v">' + P.amt + " " + P.fsym + '</span></div>' +
+          '<div class="quote-row"><span class="k">You receive (est.)</span><span class="v quote-recv">~' + recv.toFixed(6) + " " + P.tsym + '</span></div>' +
+          '<div class="quote-row"><span class="k">Platform fee</span><span class="v">0.5%</span></div>';
+        elCard.appendChild(box);
+        var note = document.createElement("div");
+        note.className = "note"; note.textContent = "Platform fee included · Excludes gas & price impact";
+        elCard.appendChild(note);
+        addButton("Swap now", function () { doSwap(q); });
+        addButton("Cancel", backToTelegram, true);
+      }
+
+      async function getLifi() {
+        var qp = new URLSearchParams({
+          fromChain: String(P.from), toChain: String(P.to),
+          fromToken: P.ftok, toToken: P.ttok,
+          fromAmount: toBaseUnits(P.amt, P.fdec), fromAddress: account,
+          toAddress: (P.rcpt && /^0x[0-9a-fA-F]{40}$/.test(P.rcpt)) ? P.rcpt : account,
+          slippage: P.slip, integrator: INTEGRATOR, fee: FEE,
+        });
+        var res = await fetch(LIFI + "?" + qp.toString());
+        if (!res.ok) { var t = ""; try { t = await res.text(); } catch (e) {} throw new Error("route: " + (t || res.status)); }
+        var j = await res.json();
+        if (!j || !j.transactionRequest || !j.transactionRequest.to) throw new Error("no route");
+        return j;
+      }
+
+      // ── SWAP (approve if needed → swap). Both transports: provider.request(). ─────
+      async function doSwap(q) {
+        try {
+          var fromTokenAddr = q.action && q.action.fromToken && q.action.fromToken.address;
+          var approvalAddr  = q.estimate && q.estimate.approvalAddress;
+          var tr = q.transactionRequest;
+
+          if (!isNativeTok(fromTokenAddr) && approvalAddr) {
+            show("Approve " + P.fsym, "Approve NexVault to swap your " + P.fsym + " — confirm in your wallet.", "", true);
+            await provider.request({ method: "eth_sendTransaction", params: [{
+              from: account, to: fromTokenAddr,
+              data: "0x095ea7b3" + pad32(approvalAddr) + "f".repeat(64), value: "0x0",
+            }] });
+            await new Promise(function (r) { setTimeout(r, 1200); });
+          }
+
+          show("Confirm the swap", "Approve the " + P.fsym + " → " + P.tsym + " swap in your wallet.", "", true);
+          var tx = { from: account, to: tr.to, data: tr.data, value: tr.value ? toHex(tr.value) : "0x0" };
+          if (tr.gasLimit) tx.gas = toHex(tr.gasLimit);
+          var txHash = await provider.request({ method: "eth_sendTransaction", params: [tx] });
+
+          show("Swap submitted 🎉", "Your " + P.fsym + " → " + P.tsym + " swap is on its way.", "ok", false);
+          if (txHash && /^0x[0-9a-f]{64}$/i.test(txHash)) addLink("View transaction", explorerTx(P.from, txHash));
+          addButton("Back to NexVault", backToTelegram);
+          try { console.log("[NexVault EVM] swap tx", txHash); } catch (e) {}
+        } catch (e) { showError((e && e.message) || e, function () { doSwap(q); }); }
+      }
+
+      start();
+    </script>
+  </body>
+</html>

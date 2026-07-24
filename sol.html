@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>NexVault · Solana</title>
+    <link rel="icon" type="image/png" href="/nexvault-app/icon.png" />
+    <!-- TweetNaCl for x25519 Diffie-Hellman + secretbox (Phantom deep-link encryption) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tweetnacl/1.0.3/nacl.min.js"></script>
+    <style>
+      :root { --bg:#080810; --card:#14141f; --text:#e8e8f4; --muted:#9a9ab0; --purple:#8b7bfd; --line:rgba(255,255,255,.08); }
+      * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+      html,body { margin:0; padding:0; background:var(--bg); color:var(--text); min-height:100vh; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+      .wrap { max-width:460px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px; text-align:center; }
+      .logo { font-size:22px; font-weight:800; letter-spacing:.5px; margin-bottom:6px; }
+      .logo span { background:linear-gradient(90deg,#8b7bfd,#3aa0ff); -webkit-background-clip:text; background-clip:text; color:transparent; }
+      .sub { color:var(--muted); font-size:13px; margin-bottom:26px; }
+      .card { width:100%; background:var(--card); border:1px solid var(--line); border-radius:18px; padding:24px 20px; }
+      .spinner { width:40px; height:40px; margin:0 auto 18px; border:3px solid rgba(255,255,255,.15); border-top-color:var(--purple); border-radius:50%; animation:spin .8s linear infinite; }
+      @keyframes spin { to { transform:rotate(360deg); } }
+      .status { font-size:15px; font-weight:600; margin-bottom:8px; }
+      .detail { color:var(--muted); font-size:12.5px; line-height:1.5; word-break:break-all; }
+      .addr { margin-top:14px; font-family:monospace; font-size:12px; background:rgba(0,0,0,.35); border:1px solid var(--line); border-radius:10px; padding:10px 12px; word-break:break-all; }
+      .ok { color:#7ee0a1; } .err { color:#ff7a7a; }
+      .quote { margin-top:16px; text-align:left; border:1px solid var(--line); border-radius:12px; padding:12px 14px; background:rgba(0,0,0,.25); }
+      .quote-row { display:flex; justify-content:space-between; font-size:13px; padding:4px 0; }
+      .quote-row .k { color:var(--muted); } .quote-row .v { font-weight:600; }
+      .quote-recv { color:#8b7bfd; font-weight:700; }
+      .note { color:var(--muted); font-size:11px; margin-top:10px; line-height:1.5; }
+      .btn { display:block; width:100%; margin-top:16px; padding:14px; border:none; border-radius:14px; font-size:15px; font-weight:700; cursor:pointer; color:#fff; background:linear-gradient(90deg,#7b5bfd,#3aa0ff); text-align:center; text-decoration:none; }
+      .btn.secondary { background:rgba(255,255,255,.06); border:1px solid var(--line); }
+      .btn[disabled] { opacity:.5; pointer-events:none; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="logo">Nex<span>Vault</span></div>
+      <div class="sub">Solana</div>
+      <div class="card" id="card">
+        <div class="spinner" id="spinner"></div>
+        <div class="status" id="status">Loading…</div>
+        <div class="detail" id="detail"></div>
+      </div>
+    </div>
+
+    <script>
+    (function () {
+      "use strict";
+
+      // ── base58 (Bitcoin alphabet) — unit-tested vs standard vectors ────────────
+      var B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+      function b58encode(bytes) {
+        var zeros = 0; while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
+        var digits = [];
+        for (var i = zeros; i < bytes.length; i++) {
+          var carry = bytes[i];
+          for (var j = 0; j < digits.length; j++) { carry += digits[j] << 8; digits[j] = carry % 58; carry = (carry / 58) | 0; }
+          while (carry > 0) { digits.push(carry % 58); carry = (carry / 58) | 0; }
+        }
+        var str = ""; for (var z = 0; z < zeros; z++) str += "1";
+        for (var q = digits.length - 1; q >= 0; q--) str += B58[digits[q]];
+        return str;
+      }
+      function b58decode(str) {
+        var zeros = 0; while (zeros < str.length && str[zeros] === "1") zeros++;
+        var bytes = [];
+        for (var i = zeros; i < str.length; i++) {
+          var c = B58.indexOf(str[i]); if (c < 0) throw new Error("Invalid base58 character");
+          var carry = c;
+          for (var j = 0; j < bytes.length; j++) { carry += bytes[j] * 58; bytes[j] = carry & 0xff; carry >>= 8; }
+          while (carry > 0) { bytes.push(carry & 0xff); carry >>= 8; }
+        }
+        var out = []; for (var z = 0; z < zeros; z++) out.push(0);
+        for (var q = bytes.length - 1; q >= 0; q--) out.push(bytes[q]);
+        return new Uint8Array(out);
+      }
+      function b64ToBytes(b64) { var bin = atob(b64); var a = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return a; }
+      function bytesToB64(bytes) { var s = ""; for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return btoa(s); }
+
+      // ── shared-secret encrypt/decrypt (nacl.box after Diffie-Hellman) ──────────
+      function encryptPayload(obj, sharedB58) {
+        var shared = b58decode(sharedB58);
+        var nonce = nacl.randomBytes(24);
+        var box = nacl.box.after(new TextEncoder().encode(JSON.stringify(obj)), nonce, shared);
+        return { nonce: b58encode(nonce), payload: b58encode(box) };
+      }
+      function decryptData(dataB58, nonceB58, sharedB58) {
+        var opened = nacl.box.open.after(b58decode(dataB58), b58decode(nonceB58), b58decode(sharedB58));
+        if (!opened) throw new Error("Could not decrypt wallet response.");
+        return JSON.parse(new TextDecoder().decode(opened));
+      }
+
+      /* ╔═══════════════════════════════════════════════════════════════════════════╗
+         ║ ✅ CONFIRMED WORKING 2026-07-18 — Phantom AND Solflare, verified by owner. ║
+         ║ ⛔ LOCKED FILE. DO NOT MODIFY WHILE WORKING ON OTHER FEATURES.             ║
+         ║                                                                           ║
+         ║ Change this file ONLY when genuinely required: the wallet's own deep-link  ║
+         ║ protocol changes, something breaks at core level, or a new feature is      ║
+         ║ deliberately added here. Never edit it as a side effect of another task.   ║
+         ║ Any change requires re-testing BOTH wallets end-to-end: connect → quote →  ║
+         ║ sign → broadcast → on-chain.                                               ║
+         ║                                                                           ║
+         ║ THE RULES THAT MAKE THIS WORK (each cost real debugging — do not relearn): ║
+         ║ 1. RESPONSE KEY NAME is per-wallet: phantom_encryption_public_key vs       ║
+         ║    solflare_encryption_public_key. We match ANY *_encryption_public_key.   ║
+         ║    Hardcoding Phantom's name broke Solflare completely (Fix #78).          ║
+         ║ 2. ANDROID uses intent:// with DOUBLE-encoded values — Telegram's in-app   ║
+         ║    browser decodes one extra time and would otherwise destroy redirect_link║
+         ║    (dk lost → "Session key missing"). iOS uses the universal link (Fix #62)║
+         ║ 3. dk (ephemeral secret) MUST ride in redirect_link. Wallets return into   ║
+         ║    the DEFAULT browser, not the one that started the flow, so localStorage ║
+         ║    alone is not enough.                                                    ║
+         ║ 4. NATIVE SOL = 11111111111111111111111111111111 (System Program), NOT the ║
+         ║    wrapped mint So111…112. Wrapped → InvalidAccountData, swap fails sim.   ║
+         ║ 5. signTransaction ONLY. signAndSendTransaction is DEPRECATED and returns  ║
+         ║    "not supported". We sign, then broadcast ourselves.                     ║
+         ║ 6. Broadcast needs a keyed RPC (Helius). Public api.mainnet-beta 403s      ║
+         ║    browser sends. Keep the initial delay + retry cycle: the network is not ║
+         ║    ready the instant the wallet hands back.                                ║
+         ║ 7. backToTelegram must REPLACE the current tab, never window.open a new    ║
+         ║    one — a lingering page stops Telegram opening the next swap (Fix #65).  ║
+         ║ 8. Connect/sign must be a real USER TAP (anchor), never a programmatic     ║
+         ║    redirect.                                                               ║
+         ╚═══════════════════════════════════════════════════════════════════════════╝ */
+
+      // ── constants ─────────────────────────────────────────────────────────────
+      // ⇩⇩ WHEN MOVING TO nexvaultapp.com: change ONLY this BASE line. Everything
+      //    (app_url, redirect_link, this page) derives from it.
+      var BASE      = "https://ruleworldc.github.io/nexvault-app";
+      var APP_URL   = BASE + "/";
+      var THIS_PAGE = BASE + "/sol.html";
+      var TG        = "https://t.me/TheNexVaultBot?startapp=home";   // ?startapp launches the Mini App, not just the chat
+      // Primary: Helius (domain-restricted to our origin, so the key is harmless if
+      // seen). Fallbacks: keyless public RPCs. Public api.mainnet-beta is omitted —
+      // it 403s browser sendTransaction.
+      var RPCS = [
+        "https://mainnet.helius-rpc.com/?api-key=b8f1254b-d873-4552-b083-dc5d5e2128ba",
+        "https://solana-rpc.publicnode.com",
+        "https://endpoints.omniatech.io/v1/sol/mainnet/public"
+      ];
+      var SK_KEY = "nv_sol_dapp_sk", SESSION_KEY = "nv_sol_session", PENDING_KEY = "nv_sol_pending";
+
+      var params = new URLSearchParams(location.search);
+      var statusEl = document.getElementById("status"), detailEl = document.getElementById("detail");
+      var spinnerEl = document.getElementById("spinner"), cardEl = document.getElementById("card");
+
+      var wallet = (params.get("w") || "phantom").toLowerCase();
+      var isSolflare = wallet === "solflare";
+      var WNAME = isSolflare ? "Solflare" : "Phantom";
+      var CONNECT_BASE = isSolflare ? "https://solflare.com/ul/v1/connect"         : "https://phantom.app/ul/v1/connect";
+      var SIGN_BASE    = isSolflare ? "https://solflare.com/ul/v1/signTransaction" : "https://phantom.app/ul/v1/signTransaction";
+
+      function show(status, detail, cls) {
+        spinnerEl.style.display = "none";
+        statusEl.textContent = status; statusEl.className = "status" + (cls ? " " + cls : "");
+        detailEl.innerHTML = detail || "";
+      }
+      function busy(status, detail) {
+        spinnerEl.style.display = ""; statusEl.textContent = status; statusEl.className = "status"; detailEl.innerHTML = detail || "";
+        while (cardEl.querySelector(".btn,.quote,.addr")) cardEl.querySelector(".btn,.quote,.addr").remove();
+      }
+      function addButton(label, onClick, secondary) {
+        var b = document.createElement("button"); b.className = "btn" + (secondary ? " secondary" : "");
+        b.textContent = label; b.onclick = onClick; cardEl.appendChild(b); return b;
+      }
+      function addLink(label, href) {
+        var a = document.createElement("a"); a.className = "btn"; a.textContent = label; a.href = href; cardEl.appendChild(a); return a;
+      }
+      // Navigate the CURRENT tab back to Telegram — do NOT window.open a new tab.
+      // A lingering sol.html tab makes Telegram's in-app browser refuse to open a fresh
+      // swap page next time (openLink becomes a no-op). Replacing the current page frees
+      // the browser so the next swap opens cleanly. Generic across all wallets.
+      function backToTelegram() { try { window.location.replace(TG); } catch (e) { window.location.href = TG; } }
+      function getSession() { try { return JSON.parse(localStorage.getItem(SESSION_KEY) || "null"); } catch (e) { return null; } }
+
+      // Turn raw chain/RPC errors into a clear, actionable message for the user.
+      function friendlyError(raw) {
+        var m = String(raw || "").toLowerCase();
+        if (/insufficientamountout|amount out|6006|slippage|exceeds desired/.test(m))
+          return { title: "Price moved too much", detail: "The market moved more than your slippage allows. Increase slippage tolerance and try again." };
+        if (/blockhash|block height|expired|not found/.test(m))
+          return { title: "Quote expired", detail: "Solana price quotes are only valid for about a minute. Tap Try again to refresh it." };
+        if (/insufficient.*(fund|lamport|balance)|debit an account|not enough|0x1$/.test(m))
+          return { title: "Not enough SOL", detail: "You need enough SOL to cover the swap plus the small network fee. Try a smaller amount." };
+        if (/invalid toaddress|1011/.test(m))
+          return { title: "Add your receiving wallet", detail: "This swap sends to another chain. Go back and enter the wallet address that should receive the tokens." };
+        if (/invalidaccountdata|invalid account/.test(m))
+          return { title: "Couldn't build this swap", detail: "This token or amount can't be routed right now. Try a different amount or token." };
+        if (/no route|not routable|route unavailable|route error|no transaction|no available quotes/.test(m))
+          return { title: "No route available", detail: "No swap route for this pair right now. Try a larger amount or a different token." };
+        if (/failed to fetch|networkerror|timeout|load failed|connection/.test(m))
+          return { title: "Network issue", detail: "Couldn't reach the network. Check your connection and tap Try again." };
+        if (/decrypt|encryption_public_key/.test(m))
+          return { title: "Couldn't read the wallet's reply", detail: "The connection response from your wallet couldn't be read. Tap Try again to reconnect." };
+        if (/session/.test(m))
+          return { title: "Session expired", detail: "Please reconnect your wallet and try again." };
+        if (/declined|reject|cancel/.test(m))
+          return { title: "Request cancelled", detail: "You declined the request in your wallet. Tap Try again to retry." };
+        return { title: "Swap couldn't complete", detail: "Something went wrong preparing this swap. Please try again." };
+      }
+      // Show a friendly error + optional Retry. The raw technical string is NOT shown
+      // to the user (only the friendly title + detail). Kept in console for support.
+      function showError(raw, retryFn) {
+        try { console.warn("[NexVault] swap error:", String(raw || "")); } catch (e) {}
+        var f = friendlyError(raw);
+        show(f.title, f.detail, "err");
+        if (retryFn) addButton("Try again", retryFn);
+        addButton("Back to Telegram", backToTelegram, true);
+        // Raw error kept OUT of the user's way but reachable for support: a small
+        // "Details" link reveals it on tap. Users only ever see the friendly message.
+        var lnk = document.createElement("div");
+        lnk.textContent = "Details";
+        lnk.style.cssText = "color:#667;font-size:11px;margin-top:16px;text-align:center;text-decoration:underline;";
+        var body = document.createElement("div");
+        body.style.cssText = "display:none;color:#8a8a9a;font-size:10px;margin-top:8px;word-break:break-all;" +
+                             "line-height:1.45;background:rgba(255,255,255,.04);border-radius:8px;padding:8px 10px;text-align:left;";
+        body.textContent = String(raw || "(no detail)").slice(0, 500);
+        lnk.onclick = function () {
+          body.style.display = (body.style.display === "none" ? "block" : "none");
+        };
+        cardEl.appendChild(lnk);
+        cardEl.appendChild(body);
+      }
+
+      // Build a wallet deep link. On Android, universal links are unreliable (many
+      // browsers just open the wallet's web/download page instead of the app), so we
+      // use an intent:// URL that forces the installed app to handle it. On iOS the
+      // universal link works. method = "connect" | "signTransaction". query starts "?..".
+      var IS_ANDROID = /android/i.test(navigator.userAgent);
+      // Build a wallet deep link from a params object. CRITICAL: Telegram's in-app
+      // browser decodes the intent:// query ONE extra time, which turns our encoded
+      // redirect_link into literal &/? and destroys it (dk lost). So for Android we
+      // DOUBLE-encode each value; it survives that extra decode and reaches Phantom
+      // correctly. base58 values (keys/nonce/payload) are unaffected by double-encoding.
+      function walletUrl(method, p) {
+        var host = isSolflare ? "solflare.com" : "phantom.app";
+        var e = encodeURIComponent;
+        var q = function (dbl) {
+          var parts = [];
+          for (var k in p) { if (!p.hasOwnProperty(k)) continue; parts.push(k + "=" + (dbl ? e(e(p[k])) : e(p[k]))); }
+          return "?" + parts.join("&");
+        };
+        if (IS_ANDROID) {
+          var pkg = isSolflare ? "com.solflare.mobile" : "app.phantom";
+          return "intent://" + host + "/ul/v1/" + method + q(true) + "#Intent;scheme=https;package=" + pkg + ";end";
+        }
+        return "https://" + host + "/ul/v1/" + method + q(false);
+      }
+
+      // Swap params carried in the URL (Telegram fills these; also used for manual test)
+      function getSwap() {
+        var s = { fromChain: params.get("from"), toChain: params.get("to"), fromToken: params.get("ftok"),
+                  toToken: params.get("ttok"), fromAmount: params.get("amt"), toAddress: params.get("rcpt"),
+                  slippage: params.get("slip") || "0.005", fromSym: params.get("fsym") || "SOL", toSym: params.get("tsym") || "token" };
+        return (s.fromChain && s.toChain && s.fromToken && s.toToken && s.fromAmount) ? s : null;
+      }
+      // Rebuild the swap query string to preserve context across wallet round-trips
+      function swapQS() {
+        // NOTE: "cb" (cache-buster) is carried through EVERY round trip so the return
+        // legs (connect/sign redirects) load the fresh page, not a cached old one.
+        var keys = ["from","to","ftok","ttok","amt","rcpt","slip","fsym","tsym","cb"], out = "";
+        keys.forEach(function (k) { var v = params.get(k); if (v) out += "&" + k + "=" + encodeURIComponent(v); });
+        return out;
+      }
+      function retryHref() { return THIS_PAGE + "?w=" + wallet + swapQS(); }
+
+      // ══════════════════════════════════════════════════════════════════════════
+      // ROUTING
+      // ══════════════════════════════════════════════════════════════════════════
+
+      // (0) returned from a DISCONNECT ("Use a different wallet") → connect FRESH so the
+      //     user can approve with a DIFFERENT account. We disconnect first because a plain
+      //     reconnect while the wallet still trusts the app opens the wallet and hangs.
+      if (params.get("disc")) {
+        try { localStorage.removeItem(SESSION_KEY); localStorage.removeItem(SK_KEY); } catch (e) {}
+        showConnect();
+        return;
+      }
+
+      // (A) wallet returned an error (declined)
+      if (params.get("errorCode") || params.get("errorMessage")) {
+        showError("declined: " + (params.get("errorMessage") || ""), function () { location.href = retryHref(); });
+        return;
+      }
+
+      // ⛔ Each wallet names its response key AFTER ITSELF:
+      //     Phantom  → phantom_encryption_public_key
+      //     Solflare → solflare_encryption_public_key
+      // Reading only Phantom's name meant Solflare returned a null key and every
+      // Solflare connect died with "Could not decrypt wallet response".
+      // Match ANY *_encryption_public_key so a new wallet needs no code change.
+      var phantomPk = params.get("phantom_encryption_public_key") ||
+                      params.get("solflare_encryption_public_key");
+      if (!phantomPk) {
+        params.forEach(function (v, k) {
+          if (!phantomPk && /_encryption_public_key$/.test(k)) phantomPk = v;
+        });
+      }
+      var nonce = params.get("nonce");
+      var data = params.get("data");
+
+      // (B) CONNECT response → decrypt, store session, continue to swap
+      if (phantomPk && nonce && data) {
+        // Try the ephemeral key from the URL first, then localStorage (same-browser
+        // fallback). Diagnostic in the failure message shows which were available.
+        var urlDk = params.get("dk"), lsDk = localStorage.getItem(SK_KEY);
+        var cands = []; if (urlDk) cands.push(urlDk); if (lsDk && lsDk !== urlDk) cands.push(lsDk);
+        var sess = null;
+        for (var ci = 0; ci < cands.length; ci++) {
+          try {
+            var dappSecret = b58decode(cands[ci]);
+            var dappPub = nacl.box.keyPair.fromSecretKey(dappSecret).publicKey;
+            var shared = nacl.box.before(b58decode(phantomPk), dappSecret);
+            var conn = decryptData(data, nonce, b58encode(shared));
+            sess = { address: conn.public_key, session: conn.session, shared: b58encode(shared),
+                     dappPub: b58encode(dappPub), wallet: wallet, ts: Date.now() };
+            break;
+          } catch (e) { /* try next candidate */ }
+        }
+        if (!sess) {
+          showError("decrypt-fail v62 [dk url:" + (urlDk ? urlDk.length : 0) +
+                    " ls:" + (lsDk ? lsDk.length : 0) + " ppk:" + (phantomPk ? phantomPk.length : 0) +
+                    " nonce:" + (nonce ? nonce.length : 0) + " data:" + (data ? data.length : 0) + "]",
+                    function () { location.href = retryHref(); });
+          return;
+        }
+        localStorage.setItem(SESSION_KEY, JSON.stringify(sess));
+        try { history.replaceState(null, "", THIS_PAGE + "?w=" + wallet + swapQS() + "&connected=1"); } catch (e) {}
+        afterConnect(sess);
+        return;
+      }
+
+      // (C) SIGN response → decrypt signed tx, broadcast
+      if (nonce && data && !phantomPk) {
+        signReturn();
+        return;
+      }
+
+      // (D) fresh / already-connected (require dappPub — older sessions lack it and
+      //     can't sign, so treat them as not-connected and reconnect cleanly)
+      (function () {
+        var sp = getSwap();
+        var sess = getSession();
+        var haveSess = sess && sess.address && sess.shared && sess.dappPub;
+        // For a swap with a cached session, DON'T silently reuse it (the user couldn't pick
+        // a different account) and DON'T blind-reconnect (Phantom/Solflare hang when they
+        // already trust the app). Show a choice: Continue with this wallet, or Use a
+        // different wallet (which disconnects first, then connects fresh so it prompts).
+        if (sp && haveSess) { showWalletChoice(sess); return; }
+        if (haveSess) { afterConnect(sess); return; }   // no-swap "am I connected?" check
+        showConnect();
+      })();
+
+      // ══════════════════════════════════════════════════════════════════════════
+      // FLOWS
+      // ══════════════════════════════════════════════════════════════════════════
+
+      function showConnect() {
+        try {
+          if (!window.nacl) throw new Error("Encryption library failed to load — check your connection.");
+          var kp = nacl.box.keyPair();
+          var skB58 = b58encode(kp.secretKey);
+          localStorage.setItem(SK_KEY, skB58);
+          // Carry dk in redirect_link so decrypt works even if Phantom lands in a
+          // different browser (Android); carry swap params so context survives.
+          // dk FIRST (before swap params) so a truncated tail can't cost us the key.
+          var redirect = THIS_PAGE + "?w=" + wallet + "&dk=" + skB58 + swapQS();
+          show("Connect your Solana wallet", "Tap below to open " + WNAME + " and approve.");
+          addLink("Connect " + WNAME, walletUrl("connect", {
+            dapp_encryption_public_key: b58encode(kp.publicKey),
+            cluster: "mainnet-beta",
+            app_url: APP_URL,
+            redirect_link: redirect,
+          }));
+          addButton("Back to Telegram", backToTelegram, true);
+        } catch (e) {
+          showError((e && e.message) || e, function () { location.href = retryHref(); });
+        }
+      }
+
+      // Cached session + a swap: let the user CHOOSE rather than silently reusing the
+      // wallet. "Continue" is the reliable path (same as before). "Use a different wallet"
+      // disconnects first (see startDisconnect) so the next connect prompts for another
+      // account instead of hanging.
+      function showWalletChoice(sess) {
+        show("Wallet connected", "Continue with this wallet, or switch to a different one.");
+        var who = document.createElement("div"); who.className = "addr";
+        who.textContent = "◎ " + sess.address.slice(0, 6) + "…" + sess.address.slice(-6);
+        cardEl.appendChild(who);
+        addButton("Continue swap", function () { afterConnect(sess); });
+        addButton("Use a different wallet", function () { startDisconnect(sess); }, true);
+        addButton("Back to Telegram", backToTelegram, true);
+      }
+
+      // Disconnect from the wallet, THEN reconnect fresh. A plain reconnect while the wallet
+      // still trusts the app opens the app and hangs with no prompt (the reason we never
+      // blind-reconnect). Disconnecting first clears that trust so the next connect prompts
+      // cleanly and the user can pick a different account. Uses the same encrypted-request
+      // format as signing (dapp_encryption_public_key + nonce + payload + redirect_link).
+      function startDisconnect(sess) {
+        try {
+          var enc = encryptPayload({ session: sess.session }, sess.shared);
+          var redirect = THIS_PAGE + "?w=" + wallet + swapQS() + "&disc=1";
+          try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
+          show("Switch wallet", "Approve the disconnect in " + WNAME + ", then reconnect with the account you want.");
+          addLink("Disconnect " + WNAME, walletUrl("disconnect", {
+            dapp_encryption_public_key: sess.dappPub,
+            nonce: enc.nonce,
+            payload: enc.payload,
+            redirect_link: redirect,
+          }));
+          addButton("Back to Telegram", backToTelegram, true);
+        } catch (e) {
+          showError((e && e.message) || e, function () { location.href = retryHref(); });
+        }
+      }
+
+      function afterConnect(sess) {
+        var sp = getSwap();
+        if (!sp) {
+          show("Wallet connected ✓", "No swap requested. Start a swap from Telegram.", "ok");
+          var d = document.createElement("div"); d.className = "addr"; d.textContent = "◎ " + sess.address.slice(0, 6) + "…" + sess.address.slice(-6); cardEl.appendChild(d);
+          addButton("Back to Telegram", backToTelegram);
+          return;
+        }
+        fetchQuoteAndRender(sess, sp);
+      }
+
+      function fetchQuoteAndRender(sess, sp) {
+        busy("Finding the best route…", "Fetching a live quote for your swap.");
+        var qp = new URLSearchParams({
+          fromChain: sp.fromChain, toChain: sp.toChain, fromToken: sp.fromToken, toToken: sp.toToken,
+          fromAmount: sp.fromAmount, fromAddress: sess.address, toAddress: sp.toAddress || sess.address,
+          slippage: sp.slippage, integrator: "nexvault-1", fee: "0.005"   // NexVault 0.5% (Solana)
+        });
+        fetch("https://li.quest/v1/quote?" + qp.toString())
+          .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error(t || ("Route error " + r.status)); }); })
+          .then(function (lifi) {
+            if (!lifi || !lifi.transactionRequest || !lifi.transactionRequest.data) throw new Error("This pair isn't routable right now.");
+            renderQuote(sess, sp, lifi);
+          })
+          .catch(function (e) { showError((e && e.message) || e, function () { fetchQuoteAndRender(sess, sp); }); });
+      }
+
+      function fmtAmount(raw, decimals) {
+        try { var n = Number(raw) / Math.pow(10, decimals || 0); return n.toLocaleString(undefined, { maximumFractionDigits: 6 }); }
+        catch (e) { return raw; }
+      }
+
+      function renderQuote(sess, sp, lifi) {
+        var est = lifi.estimate || {};
+        var toDec = (lifi.action && lifi.action.toToken && lifi.action.toToken.decimals) || 0;
+        var fromDec = (lifi.action && lifi.action.fromToken && lifi.action.fromToken.decimals) || 9;
+        var recv = est.toAmount ? fmtAmount(est.toAmount, toDec) : "~";
+        show("Confirm your swap", "");
+        var q = document.createElement("div"); q.className = "quote";
+        q.innerHTML =
+          '<div class="quote-row"><span class="k">You send</span><span class="v">' + fmtAmount(sp.fromAmount, fromDec) + " " + sp.fromSym + '</span></div>' +
+          '<div class="quote-row"><span class="k">You receive (est.)</span><span class="v quote-recv">~' + recv + " " + sp.toSym + '</span></div>' +
+          '<div class="quote-row"><span class="k">Platform fee</span><span class="v">0.5%</span></div>';
+        cardEl.appendChild(q);
+        var note = document.createElement("div"); note.className = "note";
+        note.textContent = "Excludes network & bridge fees. You'll approve the transaction in " + WNAME + ".";
+        cardEl.appendChild(note);
+        // Show WHICH wallet/account is connected (read-only) so the balance/"not enough SOL"
+        // check isn't a mystery when a cached session sent the user straight here. NO reconnect
+        // link — reconnecting hangs Phantom/Solflare (they already trust the app). Display only.
+        var who = document.createElement("div"); who.className = "note";
+        who.textContent = "Connected: ◎ " + sess.address.slice(0, 6) + "…" + sess.address.slice(-6);
+        cardEl.appendChild(who);
+        addButton("Swap now", function () { prepareSign(sess, sp); });
+        addButton("Cancel", backToTelegram, true);
+      }
+
+      // Re-fetch a FRESH Li.Fi quote at the moment of swapping, so the transaction's
+      // blockhash is brand-new when Phantom signs it (Solana blockhashes expire in
+      // ~60-90s; the connect + approval round-trips otherwise outrun the initial
+      // quote's blockhash). Then present a final "Approve" tap → wallet.
+      function prepareSign(sess, sp) {
+        busy("Locking in the latest price…", "Fetching a fresh quote so it doesn't expire.");
+        var qp = new URLSearchParams({
+          fromChain: sp.fromChain, toChain: sp.toChain, fromToken: sp.fromToken, toToken: sp.toToken,
+          fromAmount: sp.fromAmount, fromAddress: sess.address, toAddress: sp.toAddress || sess.address,
+          slippage: sp.slippage, integrator: "nexvault-1", fee: "0.005"   // NexVault 0.5% (Solana)
+        });
+        var onErr = function (e) { showError((e && e.message) || e, function () { prepareSign(sess, sp); }); };
+        fetch("https://li.quest/v1/quote?" + qp.toString())
+          .then(function (r) { return r.ok ? r.json() : r.text().then(function (t) { throw new Error(t || ("Route error " + r.status)); }); })
+          .then(function (lifi) {
+            if (!lifi || !lifi.transactionRequest || !lifi.transactionRequest.data) throw new Error("Route unavailable right now — tap Retry.");
+            var txB64 = lifi.transactionRequest.data;
+            // Pre-simulate the transaction (no signature needed) BEFORE asking the user
+            // to approve — catches bad routes/accounts and surfaces the exact program
+            // logs, so we never send a doomed tx to the wallet.
+            busy("Checking the swap…", "Simulating the transaction before you approve.");
+            fetch(RPCS[0], {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "simulateTransaction", params: [txB64, { encoding: "base64", sigVerify: false, replaceRecentBlockhash: true, commitment: "processed" }] })
+            })
+              .then(function (r) { return r.json(); })
+              .then(function (sim) {
+                if (sim.error) throw new Error("Sim RPC error: " + (sim.error.message || JSON.stringify(sim.error)));
+                var val = sim.result && sim.result.value;
+                if (val && val.err) {
+                  var logs = (val.logs || []).slice(-6).join("  •  ");
+                  throw new Error("Simulation failed: " + JSON.stringify(val.err) + (logs ? "  —  LOGS: " + logs : ""));
+                }
+                // OK → build the sign deep link and show the Approve tap
+                var enc = encryptPayload({ transaction: b58encode(b64ToBytes(txB64)), session: sess.session }, sess.shared);
+                var redirect = THIS_PAGE + "?w=" + wallet + swapQS() + "&sign=1";
+                var signUrl = walletUrl("signTransaction", {
+                  dapp_encryption_public_key: sess.dappPub,
+                  nonce: enc.nonce,
+                  payload: enc.payload,
+                  redirect_link: redirect,
+                });
+                var toDec = (lifi.action && lifi.action.toToken && lifi.action.toToken.decimals) || 0;
+                var recv = (lifi.estimate && lifi.estimate.toAmount) ? fmtAmount(lifi.estimate.toAmount, toDec) : "~";
+                var setPending = function () { try { localStorage.setItem(PENDING_KEY, JSON.stringify({ sp: sp, ts: Date.now() })); } catch (e) {} };
+                setPending();
+                show("Approve in " + WNAME, "You'll receive ~" + recv + " " + sp.toSym + ". Approve promptly — the price is time-sensitive.");
+                var link = addLink("Approve in " + WNAME, signUrl);
+                link.onclick = setPending;
+                addButton("Cancel", backToTelegram, true);
+              })
+              .catch(onErr);
+          })
+          .catch(onErr);
+      }
+
+      function signReturn() {
+        busy("Submitting your swap…", "Broadcasting the signed transaction to Solana.");
+        try {
+          var sess = getSession();
+          if (!sess || !sess.shared) throw new Error("Session expired — please reconnect.");
+          var decrypted = decryptData(data, nonce, sess.shared);   // { transaction: signedTxB58 }
+          if (!decrypted.transaction) throw new Error("Wallet did not return a signed transaction.");
+          var b64 = bytesToB64(b58decode(decrypted.transaction));
+
+          // Cycle through the RPCs WITH DELAYS. On mobile, returning from the wallet
+          // app leaves the network briefly unready → the first fetch(es) throw
+          // "Failed to fetch". Retrying after a short pause fixes it. Blockhash errors
+          // are fatal (won't recover on retry) and stop immediately.
+          var lastErr = "Broadcast failed";
+          var attempt = 0, MAX = 8;
+          function attemptBroadcast() {
+            var rpc = RPCS[attempt % RPCS.length];
+            fetch(rpc, {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "sendTransaction", params: [b64, { encoding: "base64", skipPreflight: false, maxRetries: 5 }] })
+            })
+              .then(function (r) { return r.text().then(function (t) { return { status: r.status, text: t }; }); })
+              .then(function (resp) {
+                var res; try { res = JSON.parse(resp.text); } catch (e) { throw new Error("HTTP " + resp.status + " " + (resp.text || "").slice(0, 50)); }
+                if (res.error) {
+                  var em = (res.error && res.error.message) || "RPC error";
+                  if (/blockhash|block height|expired|not found/i.test(em)) throw Object.assign(new Error(em), { fatal: true });
+                  throw new Error(em);
+                }
+                onOk(res.result);
+              })
+              .catch(function (e) {
+                lastErr = String((e && e.message) || e);
+                if (e && e.fatal) { onFail(lastErr); return; }
+                attempt++;
+                if (attempt >= MAX) { onFail(lastErr); return; }
+                busy("Submitting your swap…", "Network warming up — retrying (" + attempt + ")…");
+                setTimeout(attemptBroadcast, 800);   // pause, then retry (next RPC)
+              });
+          }
+          // Small initial delay so the network is ready after the wallet hand-back.
+          setTimeout(attemptBroadcast, 1200);
+          function onOk(sig) {
+            localStorage.removeItem(PENDING_KEY);
+            try { history.replaceState(null, "", THIS_PAGE + "?w=" + wallet + "&done=1"); } catch (e) {}
+            show("Swap submitted ✓", "Your transaction is confirming on Solana.", "ok");
+            var d = document.createElement("div"); d.className = "addr"; d.textContent = sig.slice(0, 12) + "…" + sig.slice(-12); cardEl.appendChild(d);
+            addLink("View on Solscan", "https://solscan.io/tx/" + sig);
+            addButton("Back to Telegram", backToTelegram, true);
+          }
+          function onFail(msg) { showError(msg, function () { location.href = retryHref(); }); }
+        } catch (e) {
+          showError((e && e.message) || e, function () { location.href = retryHref(); });
+        }
+      }
+    })();
+    </script>
+  </body>
+</html>

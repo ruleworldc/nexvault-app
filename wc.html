@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <title>NexVault · Connect Wallet</title>
+    <link rel="icon" type="image/png" href="/nexvault-app/icon.png" />
+    <style>
+      :root { --bg:#080810; --card:#14141f; --text:#e8e8f4; --muted:#9a9ab0; --purple:#8b7bfd; --line:rgba(255,255,255,.08); }
+      * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+      html,body { margin:0; padding:0; background:var(--bg); color:var(--text); min-height:100vh; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+      .wrap { max-width:460px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px; text-align:center; }
+      .logo { font-size:22px; font-weight:800; letter-spacing:.5px; margin-bottom:6px; }
+      .logo span { background:linear-gradient(90deg,#8b7bfd,#3aa0ff); -webkit-background-clip:text; background-clip:text; color:transparent; }
+      .sub { color:var(--muted); font-size:13px; margin-bottom:26px; }
+      .card { width:100%; background:var(--card); border:1px solid var(--line); border-radius:18px; padding:24px 20px; }
+      .status { font-size:16px; font-weight:700; margin-bottom:8px; }
+      .detail { color:var(--muted); font-size:12.5px; line-height:1.55; }
+      .err { color:#ff7a7a; }
+      .btn { display:block; width:100%; margin-top:16px; padding:15px; border:none; border-radius:14px; font-size:15px; font-weight:700; cursor:pointer; color:#fff; background:linear-gradient(90deg,#7b5bfd,#3aa0ff); text-align:center; text-decoration:none; }
+      .btn.secondary { background:rgba(255,255,255,.06); border:1px solid var(--line); color:var(--text); }
+      .note { color:var(--muted); font-size:11px; margin-top:14px; line-height:1.5; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="logo">Nex<span>Vault</span></div>
+      <div class="sub" id="sub">Connect your wallet</div>
+      <div class="card" id="card">
+        <div class="status" id="status">Preparing…</div>
+        <div class="detail" id="detail"></div>
+      </div>
+    </div>
+
+    <script>
+    (function () {
+      "use strict";
+      /* ╔═══════════════════════════════════════════════════════════════════════════╗
+         ║ NexVault WalletConnect BRIDGE — connects wallets Telegram cannot reach.    ║
+         ║                                                                           ║
+         ║ WHY THIS FILE EXISTS                                                      ║
+         ║ Telegram's Mini App WebView can only open http(s) URLs (tg.openLink).      ║
+         ║ Many wallets — Bitget, Kucoin and most of the long tail — do NOT accept    ║
+         ║ WalletConnect pairing through their https universal link; their app only   ║
+         ║ handles the NATIVE scheme (e.g. bitkeep://wc?uri=…). That is why they      ║
+         ║ connect fine in Chrome (AppKit uses the native scheme there) and never     ║
+         ║ prompt from inside Telegram. PROVEN by testing: Android routes bkapp.vip   ║
+         ║ to the Bitget app, the app opens, and still shows no prompt.               ║
+         ║                                                                           ║
+         ║ This page is a NORMAL browser page, not a Mini App WebView, so it CAN fire ║
+         ║ native schemes. Same architecture that made sol.html work for Phantom and  ║
+         ║ Solflare, which was the identical class of problem.                        ║
+         ║                                                                           ║
+         ║ WHY IT IS SAFE: the WalletConnect pairing lives on the RELAY, not in this  ║
+         ║ page. We only need to deliver the wc: URI to the wallet app. The session   ║
+         ║ then establishes directly with the Mini App that generated it — this page  ║
+         ║ never holds keys and never sees funds.                                     ║
+         ║                                                                           ║
+         ║ RULES CARRIED OVER FROM sol.html (each cost real debugging):               ║
+         ║  1. The wallet must be opened by a REAL USER TAP (anchor click), never a   ║
+         ║     programmatic redirect — iOS and Android both block the latter.         ║
+         ║  2. Return to Telegram must REPLACE this tab (location.replace), never     ║
+         ║     window.open — a lingering tab stops Telegram opening the next link.    ║
+         ║  3. Never use intent:// — it crashes the Telegram WebView. (Harmless here  ║
+         ║     since this page is outside Telegram, but we keep the plain scheme      ║
+         ║     because it works on both platforms.)                                    ║
+         ╚═══════════════════════════════════════════════════════════════════════════╝ */
+
+      var BASE = "https://ruleworldc.github.io/nexvault-app";
+      var TG   = "https://t.me/TheNexVaultBot?startapp=home";
+
+      var params  = new URLSearchParams(location.search);
+      var wname   = params.get("name") || "your wallet";
+
+      // ⛔ ACCEPT BOTH PARAM FORMATS — the app and this page are separate files that
+      // can reach the device at different times (GitHub Pages sync lag, browser cache).
+      // A mismatch previously produced a dead "Nothing to connect" page. Supporting the
+      // older uri+scheme form as well makes any version skew harmless.
+      //   dl            = COMPLETE native deep link, built by the app (preferred)
+      //   uri + scheme  = legacy: raw wc: URI plus the wallet's native scheme
+      var deepLink = params.get("dl") || "";
+      if (!deepLink) {
+        var legacyUri = params.get("uri") || "";
+        var legacyScheme = params.get("scheme") || "";
+        if (legacyUri && legacyScheme) {
+          // Strip any path the scheme already carries so we never build
+          // "bitkeep://wc/wc?uri=…" — the malformed shape the app now avoids.
+          var root = legacyScheme.replace(/^([a-z0-9.+-]+:\/\/)(.*)$/i, "$1");
+          deepLink = root + "wc?uri=" + encodeURIComponent(legacyUri);
+        }
+      }
+
+      var elStatus = document.getElementById("status");
+      var elDetail = document.getElementById("detail");
+      var elCard   = document.getElementById("card");
+      var elSub    = document.getElementById("sub");
+
+      function show(title, detail, cls) {
+        elStatus.textContent = title;
+        elStatus.className = "status" + (cls ? " " + cls : "");
+        elDetail.innerHTML = detail || "";
+      }
+      function addButton(label, onClick, secondary) {
+        var b = document.createElement("button");
+        b.className = "btn" + (secondary ? " secondary" : "");
+        b.textContent = label;
+        b.onclick = onClick;
+        elCard.appendChild(b);
+        return b;
+      }
+      /* Rule 1: a real anchor the user taps. Programmatic navigation to a custom
+         scheme is blocked/ignored by mobile browsers. */
+      function addLinkButton(label, href, secondary) {
+        var a = document.createElement("a");
+        a.className = "btn" + (secondary ? " secondary" : "");
+        a.textContent = label;
+        a.href = href;
+        a.rel = "noopener";
+        elCard.appendChild(a);
+        return a;
+      }
+      /* Rule 2: replace this tab so no stale page is left behind. */
+      function backToTelegram() {
+        try { window.location.replace(TG); } catch (e) { window.location.href = TG; }
+      }
+
+      if (!deepLink) {
+        show("Nothing to connect",
+             "This page was opened without connection details. Return to NexVault and tap Connect again."
+             + "<br><br><span style='font-size:10px;opacity:.6'>bridge v2 · params: "
+             + (Array.from(params.keys()).join(", ") || "none") + "</span>", "err");
+        addButton("Return to NexVault", backToTelegram);
+        return;
+      }
+
+      elSub.textContent = "Connect " + wname;
+      // Version marker — lets us tell instantly whether the deployed page is current
+      // (the app/page skew above is otherwise invisible and looks like a broken link).
+      try { document.title = "NexVault · Connect (v3)"; } catch (e) {}
+      show(
+        "Tap to open " + wname,
+        "Approve the connection in your wallet. You'll return to NexVault automatically, "
+        + "where you can complete your swap."
+      );
+
+      var opened = false;
+      var openBtn = addLinkButton("Open " + wname, deepLink);
+      // ONE return button, created once and promoted to primary after the wallet opens.
+      // (Adding a second on click produced two identical buttons.)
+      var backBtn = addButton("Return to NexVault", backToTelegram, true);
+
+      openBtn.addEventListener("click", function () {
+        opened = true;
+        setTimeout(function () {
+          show(
+            "Approve in " + wname,
+            "Approve the connection in your wallet. You'll be taken back to NexVault automatically."
+          );
+          openBtn.className = "btn secondary";      // de-emphasise: already used
+          openBtn.textContent = "Open " + wname + " again";
+          backBtn.className = "btn";                // now the primary action
+        }, 900);
+      });
+
+      /* ── AUTO-RETURN ─────────────────────────────────────────────────────────
+         This page ONLY establishes the WalletConnect session; the swap itself
+         happens back in the Mini App, where the user's amount and quote already
+         are. Leaving the user parked here after approving looked like a dead end
+         ("shouldn't it show the swap?"), so once they come back from the wallet we
+         send them home ourselves.
+         The wallet returning to the browser fires visibilitychange -> visible, and
+         `opened` proves they actually launched the wallet rather than just landing
+         on this page. Programmatic navigation is fine here: it targets a t.me link,
+         not a wallet scheme (the user-tap rule applies only to opening wallets). */
+      var returning = false;
+      document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState !== "visible" || !opened || returning) return;
+        returning = true;
+        show("Connected", "Taking you back to NexVault…");
+        openBtn.style.display = "none";
+        setTimeout(backToTelegram, 1200);
+      });
+
+      // If the wallet never opened, the app is probably not installed. Say so plainly
+      // rather than leaving the user on a page that appears to do nothing.
+      setTimeout(function () {
+        if (!opened) {
+          elDetail.innerHTML =
+            "If nothing happens when you tap Open, " + wname +
+            " may not be installed on this device.";
+        }
+      }, 12000);
+    })();
+    </script>
+  </body>
+</html>
