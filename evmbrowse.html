@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <title>NexVault · Open in Wallet</title>
+    <link rel="icon" type="image/png" href="/nexvault-app/icon.png" />
+    <style>
+      :root { --bg:#080810; --card:#14141f; --text:#e8e8f4; --muted:#9a9ab0; --line:rgba(255,255,255,.08); }
+      * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+      html,body { margin:0; padding:0; background:var(--bg); color:var(--text); min-height:100vh; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+      .wrap { max-width:460px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px; text-align:center; }
+      .logo { font-size:22px; font-weight:800; letter-spacing:.5px; margin-bottom:6px; }
+      .logo span { background:linear-gradient(90deg,#8b7bfd,#3aa0ff); -webkit-background-clip:text; background-clip:text; color:transparent; }
+      .sub { color:var(--muted); font-size:13px; margin-bottom:26px; }
+      .card { width:100%; background:var(--card); border:1px solid var(--line); border-radius:18px; padding:24px 20px; }
+      .status { font-size:16px; font-weight:700; margin-bottom:8px; }
+      .detail { color:var(--muted); font-size:12.5px; line-height:1.55; }
+      .err { color:#ff7a7a; }
+      .btn { display:block; width:100%; margin-top:16px; padding:15px; border:none; border-radius:14px; font-size:15px; font-weight:700; cursor:pointer; color:#fff; background:linear-gradient(90deg,#7b5bfd,#3aa0ff); text-align:center; text-decoration:none; }
+      .btn.secondary { background:rgba(255,255,255,.06); border:1px solid var(--line); color:var(--text); }
+      .note { color:var(--muted); font-size:11px; margin-top:14px; line-height:1.5; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="logo">Nex<span>Vault</span></div>
+      <div class="sub" id="sub">Open in your wallet</div>
+      <div class="card" id="card">
+        <div class="status" id="status">Preparing…</div>
+        <div class="detail" id="detail"></div>
+      </div>
+    </div>
+
+    <script>
+    (function () {
+      "use strict";
+      /* ╔═══════════════════════════════════════════════════════════════════════════╗
+         ║ NexVault BROWSER-LAUNCH BRIDGE (evmbrowse.html)                            ║
+         ║                                                                           ║
+         ║ WHY THIS FILE EXISTS                                                      ║
+         ║ Some wallets (OKX, TokenPocket, imToken, …) open their in-app dApp        ║
+         ║ browser only via a NATIVE scheme (okx://, tpdapp://, imtokenv2://).        ║
+         ║ Telegram's Mini App WebView can open ONLY http(s) via tg.openLink, so it   ║
+         ║ cannot fire those schemes. This is a NORMAL browser page (opened by        ║
+         ║ tg.openLink), so it CAN fire a native scheme — same trick as sol.html /    ║
+         ║ wc.html.                                                                   ║
+         ║                                                                           ║
+         ║ DIFFERENCE FROM wc.html: wc.html establishes a WalletConnect pairing and   ║
+         ║ then RETURNS the user to Telegram to finish the swap. Here the swap runs    ║
+         ║ INSIDE the wallet's own browser (window.ethereum injected), so the user    ║
+         ║ must STAY in the wallet browser. Therefore this page has NO auto-return.    ║
+         ║                                                                           ║
+         ║ SAFE: this page only delivers a deep link the app already built. It holds  ║
+         ║ no keys and never sees funds.                                             ║
+         ║                                                                           ║
+         ║ RULE (from sol.html / wc.html): the wallet MUST be opened by a REAL USER   ║
+         ║ TAP on an anchor — a programmatic redirect to a custom scheme is blocked   ║
+         ║ by iOS/Android. Never use intent:// (crashes the Telegram WebView; also    ║
+         ║ irrelevant here since we are outside Telegram).                            ║
+         ╚═══════════════════════════════════════════════════════════════════════════╝ */
+
+      var TG = "https://t.me/TheNexVaultBot?startapp=home";
+
+      var params  = new URLSearchParams(location.search);
+      var wname   = params.get("name") || "your wallet";
+      // dl = the COMPLETE native browser-open deep link, built by the app.
+      var deepLink = params.get("dl") || "";
+
+      /* ── ANDROID: convert the plain custom scheme to an intent:// URL ────────────
+         A plain `scheme://…` anchor is UNRELIABLE on Android — Chrome / the in-app
+         browser silently ignore it, which is why tapping "Open OKX" did nothing.
+         Android launches an app reliably via an intent:// URL. This is the SAME
+         proven mechanism sol.html uses for Phantom.
+         (intent:// is safe HERE — this is a normal browser page, NOT the Telegram
+         Mini App WebView where intent:// crashes.)
+
+         intent:// MUST name the package to launch these wallets — scheme-only did
+         NOTHING for OKX (b130). But it has to be the RIGHT package: b129 pinned OKX's
+         standalone-wallet id `com.okx.wallet` and Chrome bounced to the Play Store
+         because Guru actually has the MAIN OKX app `com.okinc.okex.gp` (its Web3
+         wallet lives inside the exchange app). With the correct package, the Play
+         Store shows ONLY when the app is genuinely not installed — the desired
+         behaviour. Package ids verified on Google Play (see CLAUDE.md).
+         iOS handles the custom scheme from a user tap, so it is left unchanged. */
+      var PKG = {
+        "okx":       "com.okx.wallet",       // OKX Wallet: Portal to Web3 (confirmed installed)
+        "imtokenv2": "im.token.app",         // imToken
+        "tpdapp":    "vip.mytokenpocket"     // TokenPocket
+      };
+      var isAndroid = /android/i.test(navigator.userAgent || "");
+      if (isAndroid && deepLink) {
+        var m = deepLink.match(/^([a-z0-9.+-]+):\/\/(.*)$/i);
+        var pkg = m && PKG[m[1].toLowerCase()];
+        if (pkg) {
+          deepLink = "intent://" + m[2] + "#Intent;scheme=" + m[1] + ";package=" + pkg + ";end";
+        }
+      }
+
+      var elStatus = document.getElementById("status");
+      var elDetail = document.getElementById("detail");
+      var elCard   = document.getElementById("card");
+      var elSub    = document.getElementById("sub");
+
+      function show(title, detail, cls) {
+        elStatus.textContent = title;
+        elStatus.className = "status" + (cls ? " " + cls : "");
+        elDetail.innerHTML = detail || "";
+      }
+      function addButton(label, onClick, secondary) {
+        var b = document.createElement("button");
+        b.className = "btn" + (secondary ? " secondary" : "");
+        b.textContent = label;
+        b.onclick = onClick;
+        elCard.appendChild(b);
+        return b;
+      }
+      function addLinkButton(label, href, secondary) {
+        var a = document.createElement("a");
+        a.className = "btn" + (secondary ? " secondary" : "");
+        a.textContent = label;
+        a.href = href;
+        a.rel = "noopener";
+        elCard.appendChild(a);
+        return a;
+      }
+      function backToTelegram() {
+        try { window.location.replace(TG); } catch (e) { window.location.href = TG; }
+      }
+
+      if (!deepLink) {
+        show("Nothing to open",
+             "This page was opened without a wallet link. Return to NexVault and pick your wallet again."
+             + "<br><br><span style='font-size:10px;opacity:.6'>evmbrowse v5 · params: "
+             + (Array.from(params.keys()).join(", ") || "none") + "</span>", "err");
+        addButton("Return to NexVault", backToTelegram);
+        return;
+      }
+
+      elSub.textContent = "Open NexVault in " + wname;
+      try { document.title = "NexVault · Open in " + wname + " (v1)"; } catch (e) {}
+      show(
+        "Tap to open " + wname,
+        "NexVault will open inside " + wname + "'s built-in browser, already connected. "
+        + "Complete your swap right there — you do not need to come back here."
+      );
+
+      var opened = false;
+      var openBtn = addLinkButton("Open " + wname, deepLink);
+      var backBtn = addButton("Back to NexVault in Telegram", backToTelegram, true);
+
+      openBtn.addEventListener("click", function () {
+        opened = true;
+        setTimeout(function () {
+          show(
+            "Opening " + wname + "…",
+            "NexVault should now be loading inside " + wname + "'s browser, connected and ready. "
+            + "Finish your swap there. If nothing opened, tap again."
+          );
+          openBtn.className = "btn secondary";
+          openBtn.textContent = "Open " + wname + " again";
+        }, 900);
+      });
+
+      // If the wallet never opened, it is probably not installed. Say so plainly.
+      setTimeout(function () {
+        if (!opened) {
+          elDetail.innerHTML =
+            "If nothing happens when you tap Open, " + wname +
+            " may not be installed on this device.";
+        }
+      }, 12000);
+    })();
+    </script>
+  </body>
+</html>

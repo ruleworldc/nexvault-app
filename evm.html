@@ -1,0 +1,955 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <title>NexVault · EVM Swap</title>
+    <link rel="icon" type="image/png" href="/nexvault-app/icon.png" />
+    <style>
+      :root { --bg:#080810; --card:#14141f; --text:#e8e8f4; --muted:#9a9ab0; --purple:#8b7bfd; --line:rgba(255,255,255,.08); }
+      * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+      html,body { margin:0; padding:0; background:var(--bg); color:var(--text); min-height:100vh; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+      .wrap { max-width:460px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px; text-align:center; }
+      .logo { font-size:22px; font-weight:800; letter-spacing:.5px; margin-bottom:6px; }
+      .logo span { background:linear-gradient(90deg,#8b7bfd,#3aa0ff); -webkit-background-clip:text; background-clip:text; color:transparent; }
+      .sub { color:var(--muted); font-size:13px; margin-bottom:26px; }
+      .card { width:100%; background:var(--card); border:1px solid var(--line); border-radius:18px; padding:24px 20px; }
+      .spinner { width:38px; height:38px; margin:0 auto 16px; border:3px solid rgba(255,255,255,.15); border-top-color:var(--purple); border-radius:50%; animation:spin .8s linear infinite; }
+      @keyframes spin { to { transform:rotate(360deg); } }
+      .status { font-size:16px; font-weight:700; margin-bottom:8px; }
+      .detail { color:var(--muted); font-size:12.5px; line-height:1.55; }
+      .ok { color:#7ee0a1; } .err { color:#ff7a7a; }
+      .quote { margin-top:16px; text-align:left; border:1px solid var(--line); border-radius:12px; padding:12px 14px; background:rgba(0,0,0,.25); }
+      .quote-row { display:flex; justify-content:space-between; font-size:13px; padding:4px 0; }
+      .quote-row .k { color:var(--muted); } .quote-row .v { font-weight:600; }
+      .quote-recv { color:#8b7bfd; font-weight:700; }
+      .note { color:var(--muted); font-size:11px; margin-top:10px; line-height:1.5; }
+      .btn { display:block; width:100%; margin-top:16px; padding:15px; border:none; border-radius:14px; font-size:15px; font-weight:700; cursor:pointer; color:#fff; background:linear-gradient(90deg,#7b5bfd,#3aa0ff); text-align:center; text-decoration:none; }
+      .btn.secondary { background:rgba(255,255,255,.06); border:1px solid var(--line); color:var(--text); }
+      .btn[disabled] { opacity:.5; pointer-events:none; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="logo">Nex<span>Vault</span></div>
+      <div class="sub" id="sub">EVM Swap</div>
+      <div class="card" id="card">
+        <div class="spinner" id="spinner"></div>
+        <div class="status" id="status">Starting…</div>
+        <div class="detail" id="detail"></div>
+      </div>
+    </div>
+
+    <script type="module">
+      /* ╔═══════════════════════════════════════════════════════════════════════════╗
+         ║ NexVault EVM SWAP ENGINE — standalone, like sol.html.                       ║
+         ║                                                                           ║
+         ║ TWO transports, ONE swap path (both expose .request()):                    ║
+         ║  • INJECTED  — when opened inside a wallet's own dApp browser              ║
+         ║    (window.ethereum). Prompts show INLINE, 100% reliable.                  ║
+         ║  • WALLETCONNECT — the OFFICIAL @walletconnect/ethereum-provider with its  ║
+         ║    modal. It handles every wallet's deep-link format AND the request       ║
+         ║    redirect that surfaces prompts — the parts we previously hand-rolled    ║
+         ║    with raw SignClient and got wrong (Bitget/Kucoin didn't surface the tx).║
+         ║                                                                           ║
+         ║ Runs on a normal browser tab, which survives wallet round-trips (unlike    ║
+         ║ the Telegram Mini App WebView). Returns to Telegram only at the end.       ║
+         ║ Fee = Li.Fi integrator fee (nexvault-1, 0.5%).                             ║
+         ╚═══════════════════════════════════════════════════════════════════════════╝ */
+
+      var BASE = "https://ruleworldc.github.io/nexvault-app";
+      // ⛔ 2026-08-05 — `?startapp=home` IS WHAT SPAWNS A SECOND MINI APP INSTANCE.
+      // The launch param tells Telegram to START the Mini App, so "Back to Telegram" opened
+      // a brand-new session on top of the one the user left. sol.html was fixed for this
+      // months ago (rule 7) and evm.html was never updated — the same "copied the model but
+      // not this piece" gap as the swap record. tg:// switches to the Telegram APP; the
+      // https form is only a fallback and carries NO launch param either, so neither can
+      // start a second instance.
+      var TG     = "tg://resolve?domain=TheNexVaultBot";
+      var TG_WEB = "https://t.me/TheNexVaultBot";
+      var WC_PROJECT_ID = "fac6a805240f9a1502dec565d2e5080d";
+      var LIFI = "https://li.quest/v1/quote";
+      var INTEGRATOR = "nexvault-1";
+      // NV tier swap discount: the app passes the already-discounted rate in "fee".
+      // This page cannot verify a tier (no Telegram session), so anything missing or
+      // out of range falls back to the full 0.5% list price.
+      var FEE = (function () {
+        var f = parseFloat(new URLSearchParams(location.search).get("fee"));
+        return (isFinite(f) && f >= 0 && f <= 0.005) ? String(f) : "0.005";
+      })();
+      var NATIVE = ["0x0000000000000000000000000000000000000000","0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"];
+      // 🔴 2026-08-05 — THE SAME STALE-LIST BUG, A THIRD TIME. This held only the original
+      // seven, so a Monad/Mantle/Linea/Scroll/zkSync/Sei/Sonic swap asked WalletConnect to
+      // REQUIRE a chain that was not in the list the wallet was offered — which is why
+      // connecting hung on "Choose your wallet". Same 13 chains as chainAddParams above;
+      // update both together.
+      var EVM_CHAINS = [1,10,56,137,8453,42161,43114,5000,143,59144,534352,324,1329,146];
+      // ⚠️ THIS IS HAND-MAINTAINED AND THAT IS A PROBLEM. deploy_relay_fix.sh stamps
+      // NV_BUILD into main.tsx but does NOT touch this, so it sat at "evm-b125" across
+      // many deploys — exactly the drift already documented for NV_BUILD ("a build
+      // number you have to remember to update is not a build number"). While it lies,
+      // the on-screen marker cannot distinguish a stale Telegram cache from live code,
+      // which is the whole reason the marker exists. Deliberately DATED, not numbered,
+      // so it cannot masquerade as a build number it is not in step with.
+      // TODO: stamp this from deploy_relay_fix.sh and gate it, like NV_BUILD.
+      var BUILD = "evm-2026-08-05c";
+
+      var params = new URLSearchParams(location.search);
+      var P = {
+        scheme: params.get("scheme") || "",
+        name:   params.get("name")   || "your wallet",
+        from:   parseInt(params.get("from") || "0", 10),
+        to:     parseInt(params.get("to")   || "0", 10),
+        ftok:   params.get("ftok") || "",
+        ttok:   params.get("ttok") || "",
+        fdec:   parseInt(params.get("fdec") || "18", 10),
+        amt:    params.get("amt") || "",
+        rcpt:   params.get("rcpt") || "",
+        slip:   params.get("slip") || "0.005",
+        fsym:   params.get("fsym") || "token",
+        tsym:   params.get("tsym") || "token",
+      };
+      // ⚠️ fromName/toName were READ in the status messages but never SET, so every
+      // message silently fell back to "the source chain" / "the destination chain".
+      // Dead branches that made the UI vaguer than it needed to be. Derived, not passed,
+      // so they cannot drift from the chain ids we actually quote with.
+      P.fromName = chainName(P.from);
+      P.toName   = chainName(P.to);
+
+      var elStatus = document.getElementById("status");
+      var elDetail = document.getElementById("detail");
+      var elCard   = document.getElementById("card");
+      var elSpin   = document.getElementById("spinner");
+      var elSub    = document.getElementById("sub");
+
+      var _dbg = document.createElement("div");
+      _dbg.style.cssText = "position:fixed;left:0;right:0;bottom:0;background:rgba(0,0,0,.88);color:#7ee0a1;font:10px/1.4 ui-monospace,monospace;padding:4px 7px;white-space:pre-wrap;word-break:break-all;z-index:99999;";
+      function setDbg(s) { try { _dbg.textContent = BUILD + " | " + s; } catch (e) {} }
+      try { document.body.appendChild(_dbg); setDbg("loading…"); } catch (e) {}
+
+      function show(title, detail, cls, spin) {
+        elSpin.style.display = spin ? "block" : "none";
+        elStatus.textContent = title;
+        elStatus.className = "status" + (cls ? " " + cls : "");
+        elDetail.innerHTML = detail || "";
+        while (elCard.children.length > 3) elCard.removeChild(elCard.lastChild);
+      }
+      function addButton(label, onClick, secondary) {
+        var b = document.createElement("button");
+        b.className = "btn" + (secondary ? " secondary" : "");
+        b.textContent = label; b.onclick = onClick;
+        elCard.appendChild(b); return b;
+      }
+      function addLink(label, href) {
+        var a = document.createElement("a");
+        a.textContent = label; a.href = href; a.target = "_blank"; a.rel = "noopener";
+        a.style.cssText = "display:block;margin-top:12px;color:#8b7bfd;font-size:12px;";
+        elCard.appendChild(a); return a;
+      }
+      // Mirrors sol.html exactly. REPLACE the tab, never window.open — a new tab is how the
+      // duplicate-instance problem started. tg:// is not routed on every platform, so if we
+      // are still visible a beat later, fall back to the https form.
+      function backToTelegram() {
+        try { window.location.replace(TG); } catch (e) { window.location.href = TG; }
+        setTimeout(function () {
+          if (!document.hidden) { try { window.location.replace(TG_WEB); } catch (e) {} }
+        }, 700);
+      }
+
+      // ── SUPABASE SWAP LOG ─────────────────────────────────────────────────────────
+      // ⚠️ THIS FILE LOGGED NOTHING AT ALL UNTIL 2026-08-04, AND IT IS THE MAIN MOBILE
+      // EVM PATH. sol.html has logged since b158 and SwapPage logs the in-app path, but
+      // every swap that routed here — i.e. essentially every mobile EVM swap — was
+      // invisible to the admin dashboard. Guru did 5-6 successful swaps in a day and saw
+      // ONE row, which is what surfaced it. A missing row reads as "no swaps happened",
+      // which is worse than a wrong row: it silently understates real volume and revenue.
+      //
+      // Logged at BROADCAST (as soon as the hash exists), NOT at delivery, deliberately:
+      // anon RLS on swap_logs is INSERT-ONLY, so a row cannot be updated later, and a row
+      // written only on completion would be lost whenever the user closes the page during
+      // the bridge wait. Guaranteeing the record matters more than the status field being
+      // able to say "delivered" — trackSwap() shows the user the real outcome either way.
+      var SUPABASE_URL = "https://dxtnqmhuxyftrbkbkgxr.supabase.co";
+      var SUPABASE_ANON_KEY = "sb_publishable_bhDEkqUa7Oh6CNx2pnf1_A_D6z4Hj59";
+      var _geo = {};
+      try {
+        fetch("https://ipapi.co/json/").then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (d) { if (d && !d.error) _geo = { country: d.country_name || d.country, region: d.region }; })
+          .catch(function () {});
+      } catch (e) {}
+      var _logged = false, _loggedFail = false;
+      // ⚠️ FAILURES WERE INVISIBLE TOO. SwapPage logs status 'failed' on the in-app path,
+      // but neither standalone page did — so a swap that never got a route, or that the
+      // user rejected, or that the bridge failed, left NO trace at all. "No row" then
+      // reads as "nothing happened" rather than "something went wrong", which is exactly
+      // the blind spot that hid the missing-logging bug in the first place.
+      function logFail(reason, txHash) {
+        if (_loggedFail) return;
+        _loggedFail = true;
+        logSwap({ status: "failed", tx_hash: txHash || "", failed_reason: String(reason || "").slice(0, 300) }, true);
+      }
+      function logSwap(f, isFail) {
+        if (!isFail) {
+          if (_logged) return;               // one row per swap, even if trackSwap re-runs on resume
+          _logged = true;
+        }
+        try {
+          fetch(SUPABASE_URL + "/rest/v1/swap_logs", {
+            method: "POST",
+            headers: { "apikey": SUPABASE_ANON_KEY, "Authorization": "Bearer " + SUPABASE_ANON_KEY,
+              "Content-Type": "application/json", "Prefer": "return=minimal" },
+            body: JSON.stringify({
+              status: f.status || "success", tab: "EVM", failed_reason: f.failed_reason || undefined,
+              from_chain: chainName(P.from), to_chain: chainName(P.to),
+              from_token: P.fsym, to_token: P.tsym,
+              from_amount: String(P.amt || ""), to_amount: f.to_amount || "",
+              from_wallet: account || "", to_wallet: f.to_wallet || "",
+              aggregator: f.aggregator || "Li.Fi", aggregator_fee_usd: "", nexvault_fee_usd: "",
+              tx_hash: f.tx_hash, wallet_name: P.name || "",
+              country: _geo.country, region: _geo.region
+            }),
+            keepalive: true
+          }).then(function (r) {
+            // ⛔ MARK ONLY ON A CONFIRMED WRITE. The whole point of the retry below is
+            // that a fire-and-forget POST can vanish — offline, ad-blocker, the request
+            // killed as the page navigates. Marking optimistically would throw away the
+            // one chance to notice and re-send.
+            if (r && r.ok && !isFail) recSet({ logged: true });
+          }).catch(function () {});
+        } catch (e) {}
+      }
+      // ⛔ RETRY A LOST SWAP LOG. Previously the row was written exactly once, right after
+      // eth_sendTransaction resolved — so a swap that succeeded ON CHAIN could leave NO
+      // record at all if the POST failed or the page died before it completed. The swap
+      // record already survives a reload and carries the hash, so the next load can finish
+      // the job. Runs before start()/resume, needs no wallet.
+      function logRetryFromRecord() {
+        var r = recGet();
+        if (!r || !r.txHash || r.logged) return;
+        logSwap({
+          tx_hash: r.txHash, to_wallet: r.to_wallet || "", to_amount: r.to_amount || "",
+          aggregator: r.aggregator || "Li.Fi"
+        });
+      }
+
+      // ── SWAP RECORD — survives the page being reloaded ────────────────────────────
+      // ⛔ THIS IS WHAT STOPS A SECOND TRANSACTION. Do not remove it to "simplify".
+      //
+      // Found by Guru's BNB USDT -> POL USDT test, 2026-08-04. The swap SUCCEEDED on
+      // chain, then: tapping "View transaction" opened the explorer, and Back brought
+      // the user to a page that had FORGOTTEN EVERYTHING — it showed the wallet list
+      // again and, on reconnect, offered to run the very same swap a second time.
+      //
+      // Why: MetaMask's in-app browser has no tab model, so target="_blank" navigates
+      // IN PLACE and Back RELOADS this page. Every bit of swap state lived in memory,
+      // so start() ran from scratch while location.search still carried amt/ftok/ttok
+      // — a fully armed swap. The user's only protection was noticing. This file had
+      // ZERO localStorage; sol.html has solved the same problem for months with its
+      // PENDING_KEY. This is that mechanism, brought across.
+      //
+      // Keyed on location.search, which is unique per hand-off because SwapPage sends
+      // cb=Date.now() — so a genuinely NEW swap gets a new key and is never blocked by
+      // an old record, while a RELOAD of the same swap finds its record and resumes.
+      var _SWAP_KEY = (function () {
+        var s = String(location.search || ""), h = 5381;
+        for (var i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+        return "nv_evm_swap_" + h.toString(36);
+      })();
+      var _REC_TTL = 24 * 60 * 60 * 1000;
+      function recGet() {
+        try {
+          var r = JSON.parse(localStorage.getItem(_SWAP_KEY) || "null");
+          if (!r || !r.ts || (Date.now() - r.ts) > _REC_TTL) return null;
+          return r;
+        } catch (e) { return null; }
+      }
+      function recSet(patch) {
+        try {
+          var r = recGet() || { ts: Date.now() };
+          for (var k in patch) r[k] = patch[k];
+          r.ts = Date.now();
+          localStorage.setItem(_SWAP_KEY, JSON.stringify(r));
+          return r;
+        } catch (e) { return null; }
+      }
+      function recClear() { try { localStorage.removeItem(_SWAP_KEY); } catch (e) {} }
+      // Old records from previous swaps would pile up forever otherwise.
+      (function purgeOldRecords() {
+        try {
+          for (var i = localStorage.length - 1; i >= 0; i--) {
+            var k = localStorage.key(i);
+            if (!k || k.indexOf("nv_evm_swap_") !== 0) continue;
+            var v = null;
+            try { v = JSON.parse(localStorage.getItem(k) || "null"); } catch (e) {}
+            if (!v || !v.ts || (Date.now() - v.ts) > _REC_TTL) localStorage.removeItem(k);
+          }
+        } catch (e) {}
+      })();
+
+      // ── Li.Fi tells us WHY. We were throwing it away. ─────────────────────────
+      // A refusal body carries `errors` as an OBJECT — {filteredOut:[{overallPath,reason}],
+      // failed:[{subpaths:{…:[{code,message}]}}]} — NOT an array. `filteredOut[].reason` is
+      // the useful field: it holds the real cause in plain language, including the bridge's
+      // own min/max range and Sei's wallet-linking requirement. Without this every one of
+      // those became "No route available", which is true and useless.
+      // ⚠️ Returns "" for anything that is not a Li.Fi body (wallet rejections, network
+      // errors) so the caller falls back to the raw string unchanged.
+      function lifiReason(raw) {
+        var j = null;
+        try { j = (typeof raw === "string") ? JSON.parse(raw) : raw; } catch (e) { return ""; }
+        if (!j || typeof j !== "object") return "";
+        var e2 = j.errors, groups = [];
+        if (Object.prototype.toString.call(e2) === "[object Array]") groups = e2;
+        else if (e2 && typeof e2 === "object") groups = [].concat(e2.filteredOut || [], e2.failed || []);
+        var reasons = [];
+        for (var i = 0; i < groups.length; i++) {
+          var r = groups[i] && groups[i].reason;
+          if (r && reasons.indexOf(r) < 0) reasons.push(r);
+        }
+        return reasons[0] || j.message || "";
+      }
+
+      function friendly(raw) {
+        // Match on Li.Fi's own reason when there is one — it is far more specific than the
+        // envelope message ("No available quotes"), which is identical for every cause.
+        var reason = "";
+        try { reason = lifiReason(String(raw || "").replace(/^[^{]*/, "")); } catch (e) {}
+        var m = String(reason || raw || "").toLowerCase();
+
+        // Sei pairs a native sei1… address with a 0x… one, and the on-chain link exists only
+        // after that account has BROADCAST a transaction on Sei. A user who merely RECEIVED
+        // tokens there has not, so every bridge filters the route out — at any amount. This
+        // is fixable by the user, but only if we say so.
+        if (/not linked to the original sei address|app\.sei\.io/.test(m))
+          return { t:"Link your Sei wallet first", d:"Sei gives every account two addresses — a native sei1… and your 0x… — and they are only linked once the account has SENT a transaction on Sei. Receiving tokens does not do it. Send any transaction from this wallet on Sei (or link it at app.sei.io), then try this swap again. The amount is not the problem." };
+        // ⛔ SENTINELS FIRST. 2026-08-05: these sat BELOW the generic buckets and the
+        // chain-switch message contains the word "networks" ("Switch networks in the
+        // wallet"), so /network/ claimed it and the user saw "Network issue · Couldn't
+        // reach the network" for a wallet that was online the whole time. A specific,
+        // self-identifying error must never be matched by a keyword bucket.
+        if (/chain-switch-failed/.test(m))
+          return { t:"Still on the wrong network", d:String(raw).replace(/^.*chain-switch-failed:\s*/, "") + " \u26d4 Do NOT approve a transaction while the wallet shows a different network — the amount would be read as that network's own coin." };
+        if (/chain-unknown/.test(m))
+          return { t:"NexVault can't add this network", d:"Your wallet doesn't have this network and NexVault has no parameters to add it. Add it manually in the wallet, then tap Try again." };
+        if (/reject|denied|cancel|user refused|4001/.test(m))  return { t:"Request cancelled", d:"You declined the request in your wallet. Tap Try again to retry." };
+        if (/insufficient|exceeds balance|not enough/.test(m)) return { t:"Not enough balance", d:"You don't have enough to cover the swap plus network gas. Try a smaller amount." };
+        // ⚠️ CHECK "out of acceptable range" BEFORE the slippage pattern.
+        // Li.Fi returns code 1002 "No available quotes" with that phrase when the
+        // AMOUNT is wrong for the route — most often a decimals mistake, since the
+        // same symbol has different decimals per chain. It was being reported as
+        // slippage, so a 6-vs-18 decimals bug read as market movement and was
+        // retried ten times with no possible chance of succeeding.
+        if (/out of acceptable range|acceptable range/.test(m))    return { t:"Amount not accepted for this route", d:"The bridge rejected this amount as outside its allowed range. Try a different amount, or a different token pair — this is not a price movement." };
+        if (/slippage|amount out|price impact/.test(m))        return { t:"Price moved too much", d:"The market moved beyond your slippage. Increase slippage and try again." };
+        // If Li.Fi gave a reason we don't have a specific case for, SHOW IT rather than
+        // flattening it to "no route" — that is what hid the Sei cause for months.
+        if (reason && !/no available quotes|no quotes/.test(String(reason).toLowerCase()))
+          return { t:"This route was refused", d:String(reason).slice(0, 300) };
+        if (/no route|not found|route|no available/.test(m))   return { t:"No route available", d:"No swap route for this pair right now. Try a different amount or token." };
+        if (/failed to fetch|network|timeout|load/.test(m))    return { t:"Network issue", d:"Couldn't reach the network. Check your connection and tap Try again." };
+        if (/chain|unsupported|4902/.test(m))                  return { t:"Wrong network", d:"Your wallet couldn't switch to the required network. Switch manually and retry." };
+        if (/session|pairing|expired|topic|connect/.test(m))   return { t:"Connection issue", d:"The wallet connection dropped. Tap Try again to reconnect." };
+        return { t:"Swap couldn't complete", d:"Something went wrong. Please try again." };
+      }
+      function showError(raw, retryFn) {
+        try { console.warn("[NexVault EVM]", String(raw || "")); } catch (e) {}
+        var f = friendly(raw);
+        show(f.t, f.d, "err", false);
+        if (retryFn) addButton("Try again", retryFn);
+        addButton("Back to Telegram", backToTelegram, true);
+        var lnk = document.createElement("div");
+        lnk.textContent = "Details";
+        lnk.style.cssText = "color:#667;font-size:11px;margin-top:16px;text-align:center;text-decoration:underline;";
+        var body = document.createElement("div");
+        body.style.cssText = "display:none;color:#8a8a9a;font-size:10px;margin-top:8px;word-break:break-all;line-height:1.45;background:rgba(255,255,255,.04);border-radius:8px;padding:8px 10px;text-align:left;";
+        body.textContent = String(raw || "(no detail)").slice(0, 400);
+        lnk.onclick = function () { body.style.display = (body.style.display === "none" ? "block" : "none"); };
+        elCard.appendChild(lnk); elCard.appendChild(body);
+      }
+
+      function isNativeTok(a) { return !a || NATIVE.indexOf(String(a).toLowerCase()) >= 0; }
+      function toBaseUnits(amount, decimals) {
+        var s = String(amount); if (s[0] === "-") s = s.slice(1);
+        var parts = s.split("."); var whole = parts[0] || "0"; var frac = parts[1] || "";
+        frac = (frac + "0".repeat(decimals)).slice(0, decimals);
+        return (whole + frac).replace(/^0+/, "") || "0";
+      }
+      function chainHex(id) { return "0x" + id.toString(16); }
+      function toHex(v) { var s = String(v); if (/^0x/i.test(s)) return s; try { return "0x" + BigInt(s).toString(16); } catch (e) { return "0x0"; } }
+      function pad32(addr) { return "0".repeat(24) + String(addr).replace(/^0x/, "").toLowerCase(); }
+      // ⚠️ These covered only the ORIGINAL 7 EVM chains, so every chain added since
+      // (Mantle, Monad, Linea, Scroll, zkSync, Sei, Sonic) and every non-EVM destination
+      // fell through to "chain 20000000000001" and a blockscan.com link that cannot
+      // resolve a Bitcoin txid or a Solana signature. The destination link on a completed
+      // EVM→BTC / EVM→SOL swap was therefore broken — the one link a user wants most.
+      function chainName(id) {
+        var m = { 1:"Ethereum", 10:"Optimism", 56:"BNB Chain", 137:"Polygon", 8453:"Base",
+                  42161:"Arbitrum", 43114:"Avalanche", 5000:"Mantle", 143:"Monad",
+                  59144:"Linea", 534352:"Scroll", 324:"zkSync Era", 1329:"Sei", 146:"Sonic",
+                  1151111081099710:"Solana", 20000000000001:"Bitcoin", 728126428:"Tron" };
+        return m[id] || ("chain " + id);
+      }
+      // ⚠️ NOT a plain prefix map — two of these do not fit that shape, and assuming they
+      // did would have shipped two broken links:
+      //   • Tron: the canonical path is /transaction/<hash>. The old "#/transaction/"
+      //     hash-router form still works in a browser but the fragment never reaches the
+      //     server, so it is legacy — verified against a live server-rendered Tronscan page.
+      //   • Sei: seitrace.com needs a chain query param AFTER the hash
+      //     (…/tx/<hash>?chain=pacific-1); the bare prefix does not resolve.
+      var EXPLORER = {
+        1:"https://etherscan.io/tx/", 10:"https://optimistic.etherscan.io/tx/",
+        56:"https://bscscan.com/tx/", 137:"https://polygonscan.com/tx/",
+        8453:"https://basescan.org/tx/", 42161:"https://arbiscan.io/tx/",
+        43114:"https://snowtrace.io/tx/", 5000:"https://mantlescan.xyz/tx/",
+        143:"https://monadscan.com/tx/", 59144:"https://lineascan.build/tx/",
+        534352:"https://scrollscan.com/tx/", 324:"https://explorer.zksync.io/tx/",
+        1329:"https://seitrace.com/tx/", 146:"https://sonicscan.org/tx/",
+        1151111081099710:"https://solscan.io/tx/",
+        20000000000001:"https://mempool.space/tx/",
+        728126428:"https://tronscan.org/transaction/"
+      };
+      var EXPLORER_SUFFIX = { 1329: "?chain=pacific-1" };
+      function explorerTx(id, hash) {
+        var p = EXPLORER[id];
+        if (!p) return "https://blockscan.com/tx/" + hash;   // EVM-only fallback, last resort
+        return p + hash + (EXPLORER_SUFFIX[id] || "");
+      }
+      // 🔴 2026-08-05 — THIS MAP HAD ONLY THE ORIGINAL SIX CHAINS, AND THE GAP WAS DANGEROUS.
+      // Every chain added since (Mantle, Monad, Linea, Scroll, zkSync, Sei, Sonic) fell to the
+      // old `|| { chainId: chainHex(id) }` fallback — a stub with no chainName, nativeCurrency
+      // or rpcUrls, which wallet_addEthereumChain rejects outright. Combined with ensureChain()
+      // swallowing every error, a Monad swap was built and handed to MetaMask WHILE STILL ON
+      // ETHEREUM: the wallet showed ETH gas and a `value` of 98 ETH (the native MON amount, in
+      // wei, interpreted as ether). Owner cancelled it. See ensureChain() below for the other
+      // half of the fix.
+      // Values mirror CHAIN_ADD_PARAMS in SwapPage.tsx — keep the two in step when adding a chain.
+      // chainId is DERIVED, never hand-typed: a wrong hex literal here is invisible until a user
+      // is staring at the wrong network in their wallet.
+      function chainAddParams(id) {
+        var C = {
+          56:    { n:"BNB Chain",    c:{name:"BNB",   symbol:"BNB", decimals:18}, r:["https://bsc-dataseed.binance.org"],        b:["https://bscscan.com"] },
+          137:   { n:"Polygon",      c:{name:"POL",   symbol:"POL", decimals:18}, r:["https://polygon-rpc.com"],                 b:["https://polygonscan.com"] },
+          42161: { n:"Arbitrum One", c:{name:"ETH",   symbol:"ETH", decimals:18}, r:["https://arb1.arbitrum.io/rpc"],            b:["https://arbiscan.io"] },
+          10:    { n:"Optimism",     c:{name:"ETH",   symbol:"ETH", decimals:18}, r:["https://mainnet.optimism.io"],             b:["https://optimistic.etherscan.io"] },
+          8453:  { n:"Base",         c:{name:"ETH",   symbol:"ETH", decimals:18}, r:["https://mainnet.base.org"],                b:["https://basescan.org"] },
+          43114: { n:"Avalanche",    c:{name:"AVAX",  symbol:"AVAX",decimals:18}, r:["https://api.avax.network/ext/bc/C/rpc"],   b:["https://snowtrace.io"] },
+          5000:  { n:"Mantle",       c:{name:"Mantle",symbol:"MNT", decimals:18}, r:["https://rpc.mantle.xyz"],                  b:["https://mantlescan.xyz"] },
+          143:   { n:"Monad",        c:{name:"MON",   symbol:"MON", decimals:18}, r:["https://rpc.monad.xyz"],                   b:["https://monadscan.com"] },
+          59144: { n:"Linea",        c:{name:"Ether", symbol:"ETH", decimals:18}, r:["https://rpc.linea.build"],                 b:["https://lineascan.build"] },
+          534352:{ n:"Scroll",       c:{name:"Ether", symbol:"ETH", decimals:18}, r:["https://rpc.scroll.io"],                   b:["https://scrollscan.com"] },
+          324:   { n:"zkSync Era",   c:{name:"Ether", symbol:"ETH", decimals:18}, r:["https://mainnet.era.zksync.io"],           b:["https://explorer.zksync.io"] },
+          1329:  { n:"Sei",          c:{name:"Sei",   symbol:"SEI", decimals:18}, r:["https://evm-rpc.sei-apis.com"],            b:["https://seitrace.com"] },
+          146:   { n:"Sonic",        c:{name:"Sonic", symbol:"S",   decimals:18}, r:["https://rpc.soniclabs.com"],               b:["https://sonicscan.org"] },
+        };
+        var c = C[id];
+        // ⛔ null, NOT a stub. A stub looks like a valid request, gets rejected by the wallet,
+        // and the rejection was being swallowed. An unknown chain must fail loudly instead.
+        if (!c) return null;
+        return { chainId: chainHex(id), chainName: c.n, nativeCurrency: c.c, rpcUrls: c.r, blockExplorerUrls: c.b };
+      }
+
+      if (!P.from || !P.to || !P.ftok || !P.ttok || !P.amt) {
+        show("Nothing to swap", "This page was opened without swap details. Return to NexVault and start again.", "err", false);
+        addButton("Back to Telegram", backToTelegram);
+        throw new Error("missing params");
+      }
+
+      // provider = the active EIP-1193 provider (injected OR WalletConnect). Both have
+      // .request(); the swap flow doesn't care which it is.
+      var provider = null;
+      var account = "";
+
+      async function loadWcProvider() {
+        var cdns = [
+          "https://esm.sh/@walletconnect/ethereum-provider@2.21.0",
+          "https://cdn.jsdelivr.net/npm/@walletconnect/ethereum-provider@2.21.0/+esm",
+        ];
+        var lastErr = null;
+        for (var i = 0; i < cdns.length; i++) {
+          try { var m = await import(cdns[i]); return m.EthereumProvider || (m.default && m.default.EthereumProvider) || m.default; }
+          catch (e) { lastErr = e; }
+        }
+        throw lastErr || new Error("Could not load wallet library");
+      }
+
+      // ── CONNECT ────────────────────────────────────────────────────────────────
+      async function start() {
+        // A) Injected: inside a wallet's own dApp browser → most reliable.
+        var eth = window.ethereum || (window.bitkeep && window.bitkeep.ethereum) || window.okxwallet;
+        if (eth && eth.request) {
+          setDbg("injected provider · connecting");
+          provider = eth;
+          show("Connecting…", "Approve the connection in your wallet.", "", true);
+          try { var a = await eth.request({ method: "eth_requestAccounts" }); account = a && a[0]; }
+          catch (e) { showError((e && e.message) || e, start); return; }
+          if (!account) { showError("wallet returned no address", start); return; }
+          try { await ensureChain(); }
+          catch (e) { showError((e && e.message) || e, start); return; }
+          setDbg("injected connected " + account.slice(0,6) + " on eip155:" + P.from);
+          return quoteAndRender();
+        }
+
+        // B) WalletConnect — official EthereumProvider + modal handles all wallets.
+        setDbg("loading WalletConnect…");
+        show("Loading…", "Preparing your wallet connection.", "", true);
+        var EP;
+        try { EP = await loadWcProvider(); }
+        catch (e) { showError("Couldn't load the wallet library. Check your connection and try again.", start); return; }
+        try {
+          provider = await EP.init({
+            projectId: WC_PROJECT_ID,
+            // ⚠️ OPTIONAL, NOT REQUIRED. `chains: [P.from]` made the swap chain mandatory in
+            // the WalletConnect proposal, so a wallet that does not know it — every wallet,
+            // for a chain it has never added — could not satisfy the namespace and the
+            // connect never resolved. That is the stuck "Choose your wallet" spinner.
+            // Requiring it was only ever a shortcut to "tx signs directly"; ensureChain()
+            // now switches and CONFIRMS properly, so the requirement buys nothing.
+            optionalChains: [P.from].concat(EVM_CHAINS.filter(function (c) { return c !== P.from; })),
+            showQrModal: true,             // official modal: wallet list + correct deep links
+            methods: ["eth_sendTransaction","personal_sign","eth_signTypedData","eth_signTypedData_v4","wallet_switchEthereumChain","wallet_addEthereumChain"],
+            events: ["chainChanged","accountsChanged"],
+            // ⛔ redirect IS THE RETURN PATH. Without it the wallet has no idea where to send
+            // the user after approving, so MetaMask authenticated and then just sat there —
+            // the user had to force-close both apps. It travels in the WC session metadata;
+            // this is the same mechanism CLAUDE.md describes for AppKit. location.href keeps
+            // the swap params, so the page resumes the same swap rather than restarting.
+            metadata: { name:"NexVault", description:"Cross-chain DEX", url:BASE+"/", icons:[BASE+"/icon.png"],
+                        redirect: { native: "", universal: location.href } },
+            qrModalOptions: { themeMode: "dark" },
+          });
+        } catch (e) { showError("init: " + ((e && e.message) || e), start); return; }
+
+        setDbg("WC ready · opening wallet picker");
+        show("Choose your wallet", "Pick your wallet to connect and swap.", "", true);
+        try {
+          // Timeout so a wallet that opens but never surfaces the WC prompt (some wallets
+          // only connect from their OWN in-app browser) doesn't hang forever.
+          await Promise.race([
+            provider.connect(),
+            new Promise(function (_, rej) { setTimeout(function () { rej(new Error("connect-timeout")); }, 45000); }),
+          ]);
+        } catch (e) {
+          if (String((e && e.message) || e).indexOf("connect-timeout") >= 0) { showWalletBrowserHelp(); return; }
+          showError((e && e.message) || e, start); return;
+        }
+
+        account = provider.accounts && provider.accounts[0];
+        if (!account) { showError("wallet returned no address", start); return; }
+        try { await ensureChain(); }
+        catch (e) { showError((e && e.message) || e, start); return; }
+        setDbg("WC connected " + account.slice(0,6) + " chain=" + provider.chainId);
+        quoteAndRender();
+      }
+
+      // Fallback for wallets that don't surface a WC prompt from an external browser
+      // (e.g. KuCoin). They DO have a built-in dApp browser where window.ethereum works
+      // (the injected path, proven with Bitget). So point the user there with this exact
+      // link — opening it inside the wallet's browser makes the swap work.
+      function showWalletBrowserHelp() {
+        var here = location.href;
+        show("Open in your wallet's browser",
+             "This wallet connects best from its OWN in-app browser. Open <b>" + P.name +
+             "</b>, go to its <b>Browser / Discover</b> tab, and open this page there — connect and swap will work.", "err", false);
+        var box = document.createElement("div");
+        box.style.cssText = "margin-top:14px;font-family:monospace;font-size:10.5px;background:rgba(0,0,0,.35);border:1px solid var(--line);border-radius:10px;padding:9px 11px;word-break:break-all;text-align:left;color:#9aa;";
+        box.textContent = here;
+        elCard.appendChild(box);
+        addButton("Copy link", function () {
+          try { navigator.clipboard.writeText(here); this.textContent = "Copied ✓"; } catch (e) {
+            try { var r = document.createRange(); r.selectNode(box); var s = getSelection(); s.removeAllRanges(); s.addRange(r); document.execCommand("copy"); this.textContent = "Copied ✓"; } catch (e2) {}
+          }
+        });
+        addButton("Try a different wallet", function () { location.reload(); }, true);
+        addButton("Back to NexVault", backToTelegram, true);
+      }
+
+      // ── Make sure the wallet is on the FROM chain. VERIFY IT. ────────────────────
+      // 🔴 2026-08-05 — this function used to wrap everything in `try {…} catch (e) {}` and
+      // return normally no matter what happened, so a failed switch was indistinguishable
+      // from a successful one and the caller went on to eth_sendTransaction on the WRONG
+      // CHAIN. For a native-token swap that means the wallet is asked to send `value` — 98
+      // MON in wei — as 98 ETHER. That is the bug the owner caught by cancelling.
+      //
+      // Two rules now:
+      //  1. NEVER trust the switch resolving. wallet_addEthereumChain in particular ADDS a
+      //     chain and does not reliably SWITCH to it, and some wallets resolve the switch
+      //     before it has taken effect. Re-read eth_chainId and confirm.
+      //  2. On failure THROW. A refusal the user can see beats a transaction they cannot undo.
+      // Read the wallet's current chain from EITHER source. eth_chainId is the standard and
+      // every wallet implements it, but the WalletConnect provider ALSO exposes .chainId
+      // directly — and having a second source matters now that a failed read is fatal rather
+      // than ignored. Returns 0 for "could not determine", never a guess.
+      async function readChainId() {
+        try {
+          var hex = await provider.request({ method: "eth_chainId" });
+          var n = parseInt(hex, 16);
+          if (n > 0) return n;
+        } catch (e) {}
+        try {
+          var w = provider.chainId;                       // WalletConnect EthereumProvider
+          var m = (typeof w === "string") ? parseInt(w, w.indexOf("0x") === 0 ? 16 : 10) : w;
+          if (m > 0) return m;
+        } catch (e2) {}
+        return 0;
+      }
+
+      async function ensureChain() {
+        var cur = await readChainId();
+        if (cur === P.from) return;
+
+        var params = chainAddParams(P.from);
+        show("Switch to " + chainName(P.from), "Approve the network switch in your wallet.", "", true);
+        try {
+          await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: chainHex(P.from) }] });
+        } catch (e) {
+          // 4902 = wallet does not know this chain. Adding is the documented remedy; any
+          // other error (user rejected, wallet busy) is NOT fixed by adding.
+          if (!params) throw new Error("chain-unknown: this wallet does not have " + chainName(P.from) + " and NexVault has no parameters to add it.");
+          try { await provider.request({ method: "wallet_addEthereumChain", params: [params] }); }
+          catch (e2) { throw new Error("chain-switch-failed: " + ((e2 && e2.message) || (e && e.message) || "wallet refused the network switch")); }
+        }
+
+        // ── CONFIRM ────────────────────────────────────────────────────────────────
+        // 🔴 2026-08-05: this was 10 polls x 300ms = 3 SECONDS, and it was wrong on mobile.
+        // wallet_switchEthereumChain hands the whole screen to the wallet app; this page is
+        // BACKGROUNDED while the user reads and approves. Three seconds expired before they
+        // had even seen the prompt, so a switch that was about to succeed reported failure —
+        // and "Try again" then worked, which is exactly what the owner saw. THE CLOCK MUST
+        // NOT RUN WHILE THE PAGE CANNOT MAKE PROGRESS: the deadline resets whenever the tab
+        // is hidden, so the budget only ever applies to time the user is actually back here.
+        show("Waiting for " + chainName(P.from), "Approve the network switch in your wallet, then come back to this page.", "", true);
+        var deadline = Date.now() + 45000;
+        while (true) {
+          cur = await readChainId();
+          if (cur === P.from) return;
+          if (document.hidden) deadline = Date.now() + 45000;   // user is inside the wallet
+          if (Date.now() > deadline) break;
+          await new Promise(function (r) { setTimeout(r, 500); });
+        }
+        throw new Error("chain-switch-failed: your wallet is still on chain " + (cur || "unknown")
+          + ", not " + chainName(P.from) + ". Change it in the wallet, then tap Try again.");
+      }
+
+      // ── QUOTE (Li.Fi) ───────────────────────────────────────────────────────────
+      async function quoteAndRender() {
+        show("Fetching best price…", "Connected: " + account.slice(0,6) + "…" + account.slice(-4), "", true);
+        var q;
+        try { q = await getLifi(); }
+        catch (e) { showError((e && e.message) || e, quoteAndRender); return; }
+
+        var recv = (q.estimate && q.estimate.toAmount)
+          ? (Number(q.estimate.toAmount) / Math.pow(10, (q.action && q.action.toToken && q.action.toToken.decimals) || 18)) : 0;
+        show("Review your swap", "", "", false);
+        var box = document.createElement("div");
+        box.className = "quote";
+        box.innerHTML =
+          '<div class="quote-row"><span class="k">You pay</span><span class="v">' + P.amt + " " + P.fsym + '</span></div>' +
+          '<div class="quote-row"><span class="k">You receive (est.)</span><span class="v quote-recv">~' + recv.toFixed(6) + " " + P.tsym + '</span></div>' +
+          '<div class="quote-row"><span class="k">Platform fee</span><span class="v">0.5%</span></div>';
+        elCard.appendChild(box);
+        var note = document.createElement("div");
+        note.className = "note"; note.textContent = "Platform fee included · Excludes gas & price impact";
+        elCard.appendChild(note);
+        addButton("Swap now", function () { doSwap(q); });
+        addButton("Cancel", backToTelegram, true);
+      }
+
+      // ⚠️ ASK THE TOKEN, DO NOT TRUST THE LIST.
+      // `fdec` arrives as a URL param derived from the app's token lists. Those lists
+      // are keyed by SYMBOL while decimals are per CHAIN — USDT is 6 on Ethereum and
+      // Polygon and 18 on BNB Chain — so a stale or hand-entered seed entry silently
+      // produced an amount a million-million times too small, which Li.Fi refused as
+      // "out of acceptable range" and the UI reported as slippage.
+      //
+      // The ERC20 contract is the only authority. One eth_call to decimals()
+      // (selector 0x313ce567) costs nothing, uses the wallet's own provider, and is
+      // immune to whichever list happened to win the race. Native coins have no
+      // contract, so they keep the param (always 18 on every chain here).
+      async function trueDecimals(tokenAddr, fallback) {
+        try {
+          if (!tokenAddr || isNativeTok(tokenAddr)) return fallback;
+          var r = await provider.request({ method: "eth_call", params: [{ to: tokenAddr, data: "0x313ce567" }, "latest"] });
+          var d = parseInt(String(r).slice(2), 16);
+          if (!isFinite(d) || d < 0 || d > 36) return fallback;
+          if (d !== fallback) console.warn("[nv] decimals mismatch for " + tokenAddr + ": list said " + fallback + ", chain says " + d + " — using the chain");
+          return d;
+        } catch (e) { return fallback; }
+      }
+
+      // ⛔ NEVER SUBSTITUTE THE CONNECTED EVM ADDRESS ON A NON-EVM DESTINATION.
+      // This line used to read:
+      //   toAddress: (P.rcpt && /^0x[0-9a-fA-F]{40}$/.test(P.rcpt)) ? P.rcpt : account
+      // A Solana, Bitcoin or Tron address can never match /^0x…$/, so a perfectly good
+      // recipient was DISCARDED and the user's own EVM address was sent as the payout
+      // address on the destination chain. Li.Fi's toAddress is "the receiving wallet
+      // address" and defaults to fromAddress when absent, so it was being asked to
+      // deliver SPL tokens to a 0x address — and correctly answered with no route.
+      // That surfaced as "No route available" on Polygon USDT → Solana USDC, 2026-08-04,
+      // and the identical hole existed for Bitcoin and Tron destinations.
+      // Failing loudly beats guessing: a wrong payout address loses the funds.
+      var NON_EVM_TO = { 1151111081099710: "Solana", 20000000000001: "Bitcoin", 728126428: "Tron" };
+      function destAddress() {
+        var want = NON_EVM_TO[P.to];
+        if (want) {
+          if (!P.rcpt) throw new Error("This swap pays out on " + want + " and needs a " + want + " address. Go back to NexVault and enter your " + want + " receive address.");
+          // SwapPage checksum-validates before opening this page (base58check for BTC and
+          // Tron, bech32 for bc1, decode-to-32-bytes for Solana), so we do not duplicate
+          // that here. But this page can also be opened straight from a URL, and ONE
+          // wrong-ecosystem case is both unmistakable and catastrophic: a 0x address as a
+          // Bitcoin/Tron/Solana payout. Rejecting it has zero false positives — no valid
+          // BTC, TRX or SOL address is 0x + 40 hex.
+          if (/^0x[0-9a-fA-F]{40}$/.test(P.rcpt)) {
+            throw new Error("The receive address is an Ethereum address, but this swap pays out on " + want + ". Go back to NexVault and enter a " + want + " address.");
+          }
+          return P.rcpt;
+        }
+        return (P.rcpt && /^0x[0-9a-fA-F]{40}$/.test(P.rcpt)) ? P.rcpt : account;
+      }
+
+      async function getLifi() {
+        var qp = new URLSearchParams({
+          fromChain: String(P.from), toChain: String(P.to),
+          fromToken: P.ftok, toToken: P.ttok,
+          fromAmount: toBaseUnits(P.amt, await trueDecimals(P.ftok, P.fdec)), fromAddress: account,
+          toAddress: destAddress(),
+          slippage: P.slip, integrator: INTEGRATOR, fee: FEE,
+        });
+        var res = await fetch(LIFI + "?" + qp.toString());
+        if (!res.ok) { var t = ""; try { t = await res.text(); } catch (e) {} throw new Error("route: " + (t || res.status)); }
+        var j = await res.json();
+        if (!j || !j.transactionRequest || !j.transactionRequest.to) throw new Error("no route");
+        return j;
+      }
+
+      // ── SWAP (approve if needed → swap). Both transports: provider.request(). ─────
+      async function doSwap(q) {
+        try {
+          var fromTokenAddr = q.action && q.action.fromToken && q.action.fromToken.address;
+          var approvalAddr  = q.estimate && q.estimate.approvalAddress;
+          var tr = q.transactionRequest;
+
+          if (!isNativeTok(fromTokenAddr) && approvalAddr) {
+            // ⚠️ APPROVE THE EXACT AMOUNT, NOT MAX UINT256.
+            // This used to send "f".repeat(64) — an UNLIMITED allowance. Two problems,
+            // both real: the wallet then shows "Unlimited" or a blank amount, which is
+            // exactly the prompt a sensible user refuses (owner: "I myself would not
+            // risk that"); and it leaves the router with unbounded access to the token
+            // for ever after. An exact allowance shows the real figure in the wallet
+            // and expires naturally by being spent.
+            var _approveAmt = toBaseUnits(P.amt, await trueDecimals(P.ftok, P.fdec));
+            var _approveHex = BigInt(_approveAmt).toString(16);
+            show("Approve " + P.amt + " " + P.fsym,
+                 "Allow NexVault to move exactly " + P.amt + " " + P.fsym + " for this swap. Nothing else can be spent.",
+                 "", true);
+            // ⛔ RE-CHECK THE CHAIN AT THE POINT OF SENDING, not just at connect time. The
+            // user can switch networks in the wallet between connecting and tapping Swap,
+            // and some wallets drop back to mainnet on their own after a round-trip.
+            await ensureChain();
+            var approveHash = await provider.request({ method: "eth_sendTransaction", params: [{
+              from: account, to: fromTokenAddr,
+              data: "0x095ea7b3" + pad32(approvalAddr) + "0".repeat(64 - _approveHex.length) + _approveHex,
+              value: "0x0",
+            }] });
+            // ⚠️ WAIT FOR THE APPROVE TO BE MINED — A FIXED SLEEP IS NOT ENOUGH.
+            // This was `setTimeout(r, 1200)`. The swap was then built while the
+            // approve was still pending, so the wallet handed it a nonce the
+            // approve had already taken: "nonce too low: next nonce 4, tx nonce 3",
+            // after the user had approved BOTH prompts. A timer cannot know when a
+            // block landed; only the receipt can.
+            show("Waiting for approval", "Confirming your " + P.fsym + " approval on-chain — this is usually a few seconds.", "", true);
+            var _ok = false;
+            for (var _i = 0; _i < 60; _i++) {            // up to ~2 minutes
+              try {
+                var rc = await provider.request({ method: "eth_getTransactionReceipt", params: [approveHash] });
+                if (rc && rc.status === "0x1") { _ok = true; break; }
+                if (rc && rc.status === "0x0") throw new Error("The token approval failed on-chain. Please try again.");
+              } catch (e) {
+                if (e && /failed on-chain/.test(e.message || "")) throw e;
+                // a transient RPC hiccup from the wallet's own provider — keep polling
+              }
+              await new Promise(function (r) { setTimeout(r, 2000); });
+            }
+            if (!_ok) throw new Error("The approval is taking unusually long to confirm. Check your wallet, then start the swap again.");
+          }
+
+          // ⚠️ STATE THE AMOUNTS HERE — THE WALLET CANNOT.
+          // For an ERC20 swap the native value is genuinely 0 (the tokens move inside
+          // the call data), so every wallet renders this as "Smart Contract Call, $0.00".
+          // That is correct but unsignable-looking: the owner's reaction was "as soon as
+          // user sees 0, it will be declined". We cannot change the wallet's screen, so
+          // OUR screen must carry the numbers the user is agreeing to.
+          // Decimals come from Li.Fi's own response — there is no `tdec` URL param,
+          // and Math.pow(10, undefined) silently yields NaN.
+          var _tdec = (q.action && q.action.toToken && q.action.toToken.decimals);
+          var _recv = (q.estimate && q.estimate.toAmountMin && _tdec != null)
+            ? (Number(q.estimate.toAmountMin) / Math.pow(10, _tdec)).toFixed(6)
+            : null;
+          show("Confirm: " + P.amt + " " + P.fsym + " → " + P.tsym,
+               "You are swapping " + P.amt + " " + P.fsym + " and will receive"
+                 + (_recv ? " at least " + _recv + " " + P.tsym : " " + P.tsym)
+                 + ". Your wallet shows $0 because the tokens move inside the contract call, not as "
+                 + (P.fsym === "POL" ? "POL" : "network currency") + " — this is normal.",
+               "", true);
+          var tx = { from: account, to: tr.to, data: tr.data, value: tr.value ? toHex(tr.value) : "0x0" };
+          if (tr.gasLimit) tx.gas = toHex(tr.gasLimit);
+
+          // ⛔ MARK BEFORE SENDING, NOT AFTER. The wallet can broadcast and the user can
+          // navigate away before eth_sendTransaction resolves, so a record written only
+          // on success leaves a window where a real transaction exists and this page has
+          // no idea. "in_flight" means: something may already be on chain — on reload we
+          // must WARN, never silently re-arm.
+          // ⛔ LAST GATE BEFORE MONEY MOVES. A native-token swap carries the amount in
+          // `value`, so sending on the wrong chain asks the wallet for that many units of
+          // the WRONG native currency — 98 MON became "98 ETH" in MetaMask on 2026-08-05.
+          // This must sit AFTER the quote and immediately BEFORE the send.
+          await ensureChain();
+          recSet({ phase: "in_flight", tool: (q.tool || (q.toolDetails && q.toolDetails.key) || ""), tdec: _tdec });
+          var txHash = await provider.request({ method: "eth_sendTransaction", params: [tx] });
+          recSet({ phase: "submitted", txHash: txHash });
+          // Log immediately — see the banner on logSwap(). If the user closes the page
+          // during the bridge wait, the swap must still appear in the admin dashboard.
+          recSet({
+            to_wallet: (function () { try { return destAddress(); } catch (e) { return account || ""; } })(),
+            to_amount: _recv || "",
+            aggregator: (q.tool || (q.toolDetails && q.toolDetails.key) || "Li.Fi")
+          });
+          logRetryFromRecord();
+
+          await trackSwap(txHash, recGet() && recGet().tool, _tdec);
+        } catch (e) {
+          // No route, user rejection, insufficient balance, chain-switch refusal — all of
+          // this used to vanish without trace. Logged BEFORE showing the error so a user
+          // who closes the page still leaves a record.
+          logFail((e && e.message) || e, (recGet() && recGet().txHash) || "");
+          showError((e && e.message) || e, function () { doSwap(q); });
+        }
+      }
+
+      // ⚠️ "SUBMITTED" IS NOT AN OUTCOME. Follow it to the end.
+      // A cross-chain swap takes minutes and can still fail after submission. Telling the
+      // user "submitted" and handing them a transaction id makes them the one who has to
+      // work out whether their money arrived. Li.Fi's /v1/status reports the bridge
+      // through to delivery, so we use it.
+      //
+      // Split out of doSwap() so a RELOAD can resume tracking — tracking needs only fetch,
+      // never the wallet, so a returning user sees their swap immediately instead of a
+      // connect prompt.
+      async function trackSwap(txHash, tool, tdec) {
+        show("Swap submitted", "Confirming on " + (P.fromName || "the source chain") + ", then bridging to " + P.tsym + ". This usually takes a few minutes — you can leave this page open.", "", true);
+        if (txHash && /^0x[0-9a-f]{64}$/i.test(txHash)) addLink("View transaction", explorerTx(P.from, txHash));
+        try { console.log("[NexVault EVM] swap tx", txHash); } catch (e) {}
+
+        var _final = null, _notFound = 0, _lastStatus = "";
+        for (var _s = 0; _s < 150; _s++) {                 // ~10 minutes
+          try {
+            var su = "https://li.quest/v1/status?txHash=" + encodeURIComponent(txHash)
+                   + "&fromChain=" + encodeURIComponent(P.from) + "&toChain=" + encodeURIComponent(P.to)
+                   + (tool ? "&bridge=" + encodeURIComponent(tool) : "");
+            var sr = await fetch(su);
+            if (!sr.ok) {
+              // ⚠️ USED TO BE SILENTLY IGNORED. A non-200 looked identical to "still
+              // pending" for the full 10 minutes, so a tracking outage was invisible.
+              try { console.warn("[NexVault EVM] status HTTP " + sr.status); } catch (e) {}
+            } else {
+              var sj = await sr.json();
+              _lastStatus = (sj && sj.status) || "";
+              // ⚠️ Li.Fi returns HTTP 200 with status NOT_FOUND for a tx it has not
+              // indexed yet — it never 404s (documented). NOT_FOUND and INVALID were
+              // therefore treated exactly like PENDING and could never end the loop.
+              if (_lastStatus === "NOT_FOUND" || _lastStatus === "INVALID") _notFound++;
+              else _notFound = 0;
+              try { setDbg("status " + _lastStatus + (sj && sj.substatus ? "/" + sj.substatus : "") + " · " + (_s + 1)); } catch (e) {}
+              if (sj && (_lastStatus === "DONE" || _lastStatus === "FAILED")) { _final = sj; break; }
+              // Never indexed after ~2 minutes: stop pretending we are tracking it.
+              if (_notFound >= 30) break;
+            }
+          } catch (e) { /* transient — keep polling */ }
+          await new Promise(function (r) { setTimeout(r, 4000); });
+        }
+
+        if (_final && _final.status === "DONE") {
+          var got = null;
+          try {
+            var rc2 = _final.receiving;
+            var _d = (rc2 && rc2.token && rc2.token.decimals);
+            if (_d == null) _d = tdec;
+            if (rc2 && rc2.amount && _d != null) got = (Number(rc2.amount) / Math.pow(10, _d)).toFixed(6);
+          } catch (e) {}
+          recSet({ phase: "done" });
+          show("Received " + (got ? got + " " + P.tsym : P.tsym) + " ✅",
+               got ? (got + " " + P.tsym + " has arrived in your wallet on " + (P.toName || "the destination chain") + ".")
+                   : ("Your " + P.tsym + " has arrived on " + (P.toName || "the destination chain") + "."),
+               "ok", false);
+          if (txHash && /^0x[0-9a-f]{64}$/i.test(txHash)) addLink("View transaction", explorerTx(P.from, txHash));
+          if (_final.receiving && _final.receiving.txHash) addLink("View on destination chain", explorerTx(P.to, _final.receiving.txHash));
+        } else if (_final && _final.status === "FAILED") {
+          recSet({ phase: "failed" });
+          // ⚠️ Produces a SECOND row for this tx_hash (a 'success' was written at
+          // broadcast, which anon insert-only RLS cannot update). That is deliberate —
+          // two joinable rows beat a silent wrong one. Dedupe by tx_hash when counting.
+          logFail("bridge reported FAILED", txHash);
+          show("Swap failed", "The bridge reported a failure. Your funds are usually returned to your wallet automatically — check the transaction for details.", "err", false);
+          if (txHash && /^0x[0-9a-f]{64}$/i.test(txHash)) addLink("View transaction", explorerTx(P.from, txHash));
+        } else if (_notFound >= 30) {
+          // Honest: the transaction exists, we just cannot follow it from here.
+          show("Submitted — can't track it here",
+               "Your transaction was sent, but the bridge tracker hasn't picked it up. This does NOT mean it failed. Open the transaction below to see its real state; do not send it again.",
+               "", false);
+          if (txHash && /^0x[0-9a-f]{64}$/i.test(txHash)) addLink("View transaction", explorerTx(P.from, txHash));
+        } else {
+          show("Still bridging", "Your swap is confirmed on the source chain and still in transit. This can take longer at busy times — it will arrive without any further action from you. Use the link above to track it.", "", false);
+          if (txHash && /^0x[0-9a-f]{64}$/i.test(txHash)) addLink("View transaction", explorerTx(P.from, txHash));
+        }
+        addButton("Back to NexVault", backToTelegram);
+      }
+
+      // ⛔ RESUME BEFORE ANYTHING ELSE. If this exact swap already produced (or may have
+      // produced) a transaction, show it — never re-arm it. This is the guard that turns
+      // "Back from the explorer" from a second transaction into a status screen.
+      function resumeIfAlreadySwapped() {
+        var r = recGet();
+        if (!r || !r.phase) return false;
+        if (r.phase === "submitted" || r.phase === "done" || r.phase === "failed") {
+          // Re-enter tracking; for done/failed it settles on the first poll.
+          trackSwap(r.txHash, r.tool, r.tdec);
+          addNewSwapEscape();
+          return true;
+        }
+        if (r.phase === "in_flight") {
+          show("This swap was already started",
+               "A transaction for this swap was sent to your wallet and we didn't get its id back — it may already be on chain. <b>Check your wallet or the block explorer before trying again.</b> Sending it twice would swap twice.",
+               "err", false);
+          addButton("Back to NexVault", backToTelegram);
+          addNewSwapEscape();
+          return true;
+        }
+        return false;
+      }
+      // Deliberately a SECONDARY button and never automatic: starting over must be an
+      // explicit decision, because it means signing a second transaction.
+      // ⚠️ TWO TAPS, NOT window.confirm(). A native dialog is unreliable inside wallet
+      // in-app browsers (and blocks the WebView outright in the Telegram one), so the
+      // confirmation is in-page: the first tap only re-labels the button.
+      function addNewSwapEscape() {
+        var armed = false;
+        var b = addButton("Start this swap again", function () {
+          if (!armed) {
+            armed = true;
+            b.textContent = "Tap again — only if the first one did NOT go through";
+            b.className = "btn";
+            setTimeout(function () { if (armed) { armed = false; b.textContent = "Start this swap again"; b.className = "btn secondary"; } }, 6000);
+            return;
+          }
+          recClear();
+          start();
+        }, true);
+      }
+
+      // A swap logged on a previous load is a no-op here; one that never landed gets a
+      // second chance. Deliberately BEFORE the resume/start branch so it runs regardless.
+      try { logRetryFromRecord(); } catch (e) {}
+      if (!resumeIfAlreadySwapped()) start();
+    </script>
+  </body>
+</html>
