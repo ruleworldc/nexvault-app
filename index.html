@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <!-- ⛔ CACHE CONTROL — MUST STAY.
+         GitHub Pages lets clients cache index.html. Telegram's WebView caches it
+         aggressively, so it keeps requesting the OLD content-hashed bundle filename
+         (assets/index-XXXX.js) long after a new build is published. Symptom: deploys
+         succeed, the new bundle is provably live on the server, and the device still
+         runs old code — which looks exactly like "the fix didn't work".
+         These force a revalidation of the HTML shell on every open. The hashed assets
+         it references stay cacheable, so this costs one small request, not performance. -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <!-- nexvault-illegal-invocation-suppressor : suppress WalletConnect heartbeat "Illegal invocation" (non-fatal)
+         PLUS known-harmless WalletConnect relay/session noise so they never reach the
+         debug error banner defined later in this file.
+         THIS SCRIPT MUST STAY FIRST IN <head> — it is registered before the Telegram SDK
+         and before the debug error-trap below, so its stopImmediatePropagation() actually
+         prevents those later window listeners (incl. the orange banner) from firing. -->
+    <script data-purpose="nexvault-illegal-invocation-suppressor">
+    (function () {
+      "use strict";
+      // Known-harmless WalletConnect relay/session messages. These are recoverable —
+      // the wallet connection continues to work after any of them. They must NOT
+      // trigger the debug error banner (which alarms users for no reason).
+      var WC_NOISE = [
+        "no matching key", "session topic", "topic service", "alreadyexists",
+        "socket stalled", "subscribe request", "relayer not initialized",
+        "request expired", "proposal expired", "missing or invalid",
+        "failed to decrypt", "no internet connection", "websocket connection",
+        "wss://", "unsupported wc_", "json-rpc", "internal json", "expirer",
+        "pairing", "restore will override"
+      ];
+      function suppressible(message, stack) {
+        var msg = String(message == null ? "" : message);
+        var stk = String(stack == null ? "" : stack).toLowerCase();
+        var lower = msg.toLowerCase();
+        // Category 1: WalletConnect "Illegal invocation" heartbeat noise
+        if (msg.indexOf("Illegal invocation") !== -1) {
+          if (msg === "Illegal invocation") return true;
+          if (
+            stk.indexOf("checkexpirations") !== -1 ||
+            stk.indexOf("walletconnect") !== -1 ||
+            stk.indexOf("relayer") !== -1
+          ) return true;
+        }
+        // Category 2: known-harmless WalletConnect relay/session noise
+        for (var i = 0; i < WC_NOISE.length; i++) {
+          if (lower.indexOf(WC_NOISE[i]) !== -1) return true;
+        }
+        return false;
+      }
+      window.addEventListener("unhandledrejection", function (e) {
+        var r = e.reason;
+        var msg = (r && typeof r === "object" && "message" in r) ? r.message : r;
+        var stk = r && r.stack;
+        if (suppressible(msg, stk)) {
+          e.preventDefault();
+          if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+        }
+      }, true);
+      window.addEventListener("error", function (e) {
+        var err = e.error;
+        var msg = (err && err.message) || e.message;
+        var stk = err && err.stack;
+        if (suppressible(msg, stk)) {
+          e.preventDefault();
+          if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+        }
+      }, true);
+    })();
+    </script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>NexVault — Cross-chain DEX aggregator</title>
+    <link rel="icon" type="image/png" href="/icon.png" />
+    <!-- ⚠️ THIS IS WHAT A WALLET READS ABOUT US (2026-08-16). Phantom blocked a real swap with
+         a full-screen red "Request blocked · This dApp could be malicious", and the domain is
+         NOT on its blocklist — it is the unreviewed-new-domain verdict. Phantom's own
+         "Displaying Your App" guidance says it reads og:title (falling back to <title>) and
+         apple-touch-icon (falling back to the favicon) from the `app_url` we send at connect,
+         which is exactly `https://nexvaultapp.com/` — THIS page. With no og tags and no
+         apple-touch-icon there was nothing for a reviewer or a wallet sheet to show.
+         ⛔ These are metadata only: no script, no behaviour, nothing the app reads. -->
+    <link rel="apple-touch-icon" href="/icon.png" />
+    <meta name="description" content="NexVault — swap across TON, Ethereum, BNB Chain, Polygon, Solana, Bitcoin and Tron from one non-custodial app. On-chain, transparent fees." />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="NexVault" />
+    <meta property="og:title" content="NexVault — Cross-chain DEX aggregator" />
+    <meta property="og:description" content="Swap across TON, Ethereum, BNB Chain, Polygon, Solana, Bitcoin and Tron from one non-custodial app. On-chain, transparent fees." />
+    <meta property="og:url" content="https://nexvaultapp.com/" />
+    <meta property="og:image" content="https://nexvaultapp.com/icon.png" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="NexVault — Cross-chain DEX aggregator" />
+    <meta name="twitter:description" content="Swap across TON, Ethereum, BNB Chain, Polygon, Solana, Bitcoin and Tron from one non-custodial app." />
+
+    <!-- Telegram Mini App SDK — MUST load before React bundle -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+    <!-- Immediate dark background — prevents white flash before React loads -->
+    <style>
+      html, body, #root {
+        margin: 0; padding: 0;
+        background: #080810;
+        min-height: 100vh;
+        color: #e8e8f4;
+      }
+      /* Tab rows (DeFi/Games and TON / EVM-SOL) span the full width, each button an
+         equal half. ID selectors outrank any class rule in index.css (which was leaving
+         them left-aligned with dead space on the right), even with !important. */
+      #nvTabsApp, #nvTabsChain {
+        display: flex !important;
+        width: 100% !important;
+      }
+      #nvTabsApp > .nv-app-tab, #nvTabsChain > .nv-app-tab {
+        flex: 1 1 0 !important;
+        min-width: 0 !important;
+        width: auto !important;
+        max-width: none !important;
+        text-align: center !important;
+      }
+    </style>
+
+    <!-- JS error trap — shows red banner instead of silent blank screen.
+         NOTE: harmless WalletConnect relay noise is filtered out upstream by the
+         suppressor at the top of <head>, so it will not reach these banners. -->
+    <script>
+      // ⚠️ DIAGNOSTIC BANNERS — OFF UNLESS EXPLICITLY ASKED FOR.
+      // These printed a red bar for any JS error and an orange bar for any
+      // unhandled rejection, unconditionally, to every visitor. They also bypassed
+      // the suppressible() filter directly above, so even known-harmless
+      // WalletConnect noise was shown. A public visitor's first impression was a
+      // stack trace across the bottom of the landing page.
+      //
+      // Still available when you need them — add ?nvdebug=1 to the URL, or run
+      // localStorage.setItem('nv_debug','1'). Everything is logged to the console
+      // either way, so nothing is lost, it is just no longer shown to users.
+      var NV_DEBUG = false;
+      try {
+        NV_DEBUG = location.search.indexOf('nvdebug=1') !== -1
+                || localStorage.getItem('nv_debug') === '1';
+      } catch (e) {}
+      function nvBanner(text, colour, atTop) {
+        if (!NV_DEBUG) return;
+        var b = document.createElement('div');
+        b.style.cssText = 'position:fixed;' + (atTop ? 'top:0' : 'bottom:0') +
+          ';left:0;right:0;padding:8px 12px;background:' + colour +
+          ';color:#fff;font:12px monospace;z-index:99999;word-break:break-all';
+        b.textContent = text;
+        var host = document.body || document.documentElement;
+        atTop ? host.prepend(b) : host.appendChild(b);
+      }
+      window.addEventListener('error', function(e) {
+        if (suppressible(e.message, e.error && e.error.stack)) return;
+        console.error('[nv] JS Error:', e.message, e.filename + ':' + e.lineno);
+        nvBanner('⚠ JS Error: ' + e.message + ' (' + (e.filename||'') + ':' + e.lineno + ')', '#ff4466', true);
+      });
+      window.addEventListener('unhandledrejection', function(e) {
+        var reason = (e.reason && e.reason.message) || e.reason || 'unknown';
+        if (suppressible(String(reason), e.reason && e.reason.stack)) return;
+        console.error('[nv] Unhandled rejection:', e.reason);
+        nvBanner('⚠ Unhandled Promise: ' + reason, '#ff8c00', false);
+      });
+    </script>
+    <script type="module" crossorigin src="/assets/index-DrGQEb38.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/rolldown-runtime-BG2f4sTM.js">
+    <link rel="modulepreload" crossorigin href="/assets/utils-De7E53Fk.js">
+    <link rel="modulepreload" crossorigin href="/assets/sha3-CnZDNKas.js">
+    <link rel="modulepreload" crossorigin href="/assets/utils-CC8mSN0M.js">
+    <link rel="modulepreload" crossorigin href="/assets/ccip-BfNZvHyR.js">
+    <link rel="modulepreload" crossorigin href="/assets/ModalController-CrVFV_RF.js">
+    <link rel="modulepreload" crossorigin href="/assets/dist-B7i5UW96.js">
+    <link rel="modulepreload" crossorigin href="/assets/events-Dbk1A7IS.js">
+    <link rel="modulepreload" crossorigin href="/assets/hmac-Bd-7HMJf.js">
+    <link rel="modulepreload" crossorigin href="/assets/sha256-CCrwDzUl.js">
+    <link rel="modulepreload" crossorigin href="/assets/secp256k1-p_zDkruL.js">
+    <link rel="modulepreload" crossorigin href="/assets/_esm-DDzVWo9Q.js">
+    <link rel="modulepreload" crossorigin href="/assets/wui-text-U3-alNhv.js">
+    <link rel="modulepreload" crossorigin href="/assets/ConstantsUtil-DOFn2b0I.js">
+    <link rel="modulepreload" crossorigin href="/assets/wui-icon-box-CFoJ2zrz.js">
+    <link rel="modulepreload" crossorigin href="/assets/ConstantsUtil-Dnxv1B60.js">
+    <link rel="modulepreload" crossorigin href="/assets/ref-BvKE_OP8.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-zvuW_CJ1.css">
+  </head>
+  <body>
+
+    <div id="root"></div>
+  </body>
+</html>

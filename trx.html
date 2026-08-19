@@ -1,0 +1,1918 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <title>NexVault · Tron Swap</title>
+    <link rel="icon" type="image/png" href="/nexvault-app/icon.png" />
+    <style>
+      :root { --bg:#080810; --card:#14141f; --text:#e8e8f4; --muted:#9a9ab0; --purple:#8b7bfd; --line:rgba(255,255,255,.08); }
+      * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+      html,body { margin:0; padding:0; background:var(--bg); color:var(--text); min-height:100vh; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+      .wrap { max-width:460px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px; text-align:center; }
+      .logo { font-size:22px; font-weight:800; letter-spacing:.5px; margin-bottom:6px; }
+      .logo span { background:linear-gradient(90deg,#8b7bfd,#3aa0ff); -webkit-background-clip:text; background-clip:text; color:transparent; }
+      .sub { color:var(--muted); font-size:13px; margin-bottom:26px; }
+      .card { width:100%; background:var(--card); border:1px solid var(--line); border-radius:18px; padding:24px 20px; }
+      .spinner { width:38px; height:38px; margin:0 auto 16px; border:3px solid rgba(255,255,255,.15); border-top-color:var(--purple); border-radius:50%; animation:spin .8s linear infinite; }
+      @keyframes spin { to { transform:rotate(360deg); } }
+      .status { font-size:16px; font-weight:700; margin-bottom:8px; }
+      .detail { color:var(--muted); font-size:12.5px; line-height:1.55; }
+      .ok { color:#7ee0a1; } .err { color:#ff7a7a; }
+      .quote { margin-top:16px; text-align:left; border:1px solid var(--line); border-radius:12px; padding:12px 14px; background:rgba(0,0,0,.25); }
+      .quote-row { display:flex; justify-content:space-between; font-size:13px; padding:4px 0; }
+      .quote-row .k { color:var(--muted); } .quote-row .v { font-weight:600; }
+      .quote-recv { color:#8b7bfd; font-weight:700; }
+      .note { color:var(--muted); font-size:11px; margin-top:10px; line-height:1.5; }
+      .warn { color:#ffcf7a; font-size:11.5px; margin-top:10px; line-height:1.55; text-align:left;
+              background:rgba(255,207,122,.08); border:1px solid rgba(255,207,122,.22); border-radius:10px; padding:9px 11px; }
+      .addr { color:var(--muted); font-size:11px; margin-top:12px; word-break:break-all; }
+      .btn { display:block; width:100%; margin-top:16px; padding:15px; border:none; border-radius:14px; font-size:15px; font-weight:700; cursor:pointer; color:#fff; background:linear-gradient(90deg,#7b5bfd,#3aa0ff); text-align:center; text-decoration:none; }
+      .btn.secondary { background:rgba(255,255,255,.06); border:1px solid var(--line); color:var(--text); }
+      .btn[disabled] { opacity:.5; pointer-events:none; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="logo">Nex<span>Vault</span></div>
+      <div class="sub" id="sub">Tron Swap</div>
+      <div class="card" id="card">
+        <div class="spinner" id="spinner"></div>
+        <div class="status" id="status">Starting…</div>
+        <div class="detail" id="detail"></div>
+      </div>
+    </div>
+
+    <script type="module">
+      /* ╔═══════════════════════════════════════════════════════════════════════════╗
+         ║ NexVault TRON SWAP ENGINE — Tron as the SOURCE chain.                     ║
+         ║                                                                           ║
+         ║ ⛔ WHY THIS IS THE evm.html MODEL AND NOT THE sol.html MODEL.             ║
+         ║ sol.html works because Phantom publishes an ENCRYPTED DEEP-LINK PROTOCOL: ║
+         ║ a plain web page hands over a transaction and the SIGNATURE comes back in ║
+         ║ the redirect. TronLink has no such thing. Its deeplink docs do define a   ║
+         ║ `sign` action, but (a) the result is delivered to an HTTPS callback on a  ║
+         ║ SERVER, with no mechanism to return anything to the originating tab, and  ║
+         ║ (b) it never returns a signature at all — TronLink signs AND broadcasts   ║
+         ║ itself and hands back only a tx hash. So the sol.html shape is not merely ║
+         ║ harder here, it is impossible. (docs.tronlink.org/mobile/deeplink,        ║
+         ║ verified 2026-08-14.)                                                     ║
+         ║                                                                           ║
+         ║ Therefore: this page runs INSIDE TronLink's own dApp browser, where       ║
+         ║ TronWeb is injected, exactly as evm.html runs inside a wallet's browser.  ║
+         ║ SwapPage opens it through evmbrowse.html, which fires                     ║
+         ║ tronlinkoutside://pull.activity — Telegram's openLink cannot fire a       ║
+         ║ custom scheme, and TronLink publishes no https universal link.            ║
+         ╚═══════════════════════════════════════════════════════════════════════════╝ */
+
+      // ⚠️ HAND-MAINTAINED, like evm.html's. The deploy script does not stamp it.
+      var BUILD = "trx-2026-08-15h";
+
+      var BASE = "https://nexvaultapp.com";
+      var IS_ANDROID = /android/i.test(navigator.userAgent);
+      var TG_WEB = "https://t.me/TheNexVaultBot";   // no launch param: cannot spawn a 2nd instance
+      // Identical to evm.html/sol.html. See the evidence banner on addTgButton() below.
+      var TG = IS_ANDROID
+        ? "intent://resolve?domain=TheNexVaultBot#Intent;scheme=tg;S.browser_fallback_url="
+          + encodeURIComponent(TG_WEB) + ";end"
+        : "tg://resolve?domain=TheNexVaultBot";
+
+      var LIFI = "https://li.quest/v1/quote";
+      var INTEGRATOR = "nexvault-1";
+      var TRON_CHAIN_ID = 728126428;
+      var TRX_NATIVE = "T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb";   // Li.Fi's address for native TRX
+      // ⚠️ NOT the EVM zero address. Quoting TRX with 0x000…0 returns "could not find token
+      // on chain", which reads like an unsupported chain and is not one — that misread once
+      // produced a wrong "Tron is unsupported" conclusion and cost two rounds of probing.
+
+      // Our OWN TronWeb, from a CDN, used for everything except the signature. The injected
+      // TronLink build may predate deserializeTx / getCurrentRefBlockParams / newTxID, so
+      // relying on it for the rebuild would break on older wallets with no clear error.
+      // Li.Fi's own SDK does exactly this: bundled TronWeb for RPC and rebuild, the wallet
+      // object touched ONLY for trx.sign.
+      // 🔴 THE FIRST TWO SOURCES HERE WERE BOTH **ON-THE-FLY ESM BUILD SERVICES**, AND
+      // TRONWEB IS THE WORST POSSIBLE INPUT FOR ONE (2026-08-14). `esm.sh/tronweb` and
+      // jsDelivr's `/+esm` do not serve a file — they COMPILE the package on request, and
+      // tronweb is ~1MB across 9 dependencies (ethers, google-protobuf, axios,
+      // ethereum-cryptography…). The page reached the owner as "Couldn't load the Tron
+      // library" on the very first build that was ever actually served.
+      // ⛔ **TRONWEB SHIPS A PREBUILT BROWSER BUNDLE AND WE WERE NOT USING IT.**
+      // `dist/TronWeb.js` is a 963KB UMD webpack build, present in the npm tarball, served
+      // as a STATIC FILE by every CDN — nothing to compile, nothing to fail. That is now
+      // tier 1, from TWO independent hosts. The ESM services stay as tiers 3-4 only.
+      // ⚠️ jsDelivr is first because `evm.html` already proves that host reaches this
+      // owner's device — it is where the WalletConnect provider comes from on the EVM path
+      // that has completed real swaps. Prefer a host with evidence over a host with a
+      // reputation.
+      // ⚠️ THE UMD GLOBAL IS A NAMESPACE, NOT THE CLASS. `window.TronWeb` is
+      // `{utils, BigNumber, TransactionBuilder, Trx, …, TronWeb}` — the CONSTRUCTOR is
+      // `window.TronWeb.TronWeb`. Using the global directly gives "not a constructor".
+      var TRONWEB_SOURCES = [
+        { kind: "umd", url: "https://cdn.jsdelivr.net/npm/tronweb@6.4.0/dist/TronWeb.js" },
+        { kind: "umd", url: "https://unpkg.com/tronweb@6.4.0/dist/TronWeb.js" },
+        { kind: "esm", url: "https://esm.sh/tronweb@6.4.0" },
+        { kind: "esm", url: "https://cdn.jsdelivr.net/npm/tronweb@6.4.0/+esm" },
+      ];
+      var TRON_RPCS = [
+        "https://api.trongrid.io",
+        "https://tron-rpc.publicnode.com",
+      ];
+      // ── 🔑 TRONGRID API KEY ────────────────────────────────────────────────────
+      // Without one, TronGrid allows ONE REQUEST PER SECOND per IP (10 → 8 → 6 → 3 → 1 QPS
+      // across May–June 2023, never raised). The cost model fires four reads back to back,
+      // so the last of them was refused every time and the page could never price energy.
+      // ⚠️ THIS KEY IS PUBLIC AND THAT IS BY DESIGN. trx.html is served from GitHub Pages;
+      // anything in it is readable. The defence is NOT secrecy — it is TronGrid's per-key
+      // **Origin allowlist**, set to https://nexvaultapp.com (and https://ruleworldc.github.io
+      // while the old origin still serves), which makes the key useless from any other site.
+      // ⛔ ADD EVERY NEW ORIGIN TO THE ALLOWLIST BEFORE DEPLOYING TO IT — a missing entry is a
+      // 403 on the cost reads and the page silently falls back to bandwidth-only pricing.
+      // Do not treat this like a server secret and do not put
+      // it in .dev.vars; it is a public identifier with a domain lock on it.
+      // ⛔ IF THE ORIGIN ALLOWLIST IS NOT SET, THIS KEY IS OPEN TO ANYONE WHO READS THE PAGE.
+      // ✅ Verified against tronweb 6.4.0 src/tronweb.ts:132 → setFullNodeHeader(headers),
+      // which builds a fresh HttpProvider carrying them on every request.
+      var TRONGRID_KEY = "ab2fbe68-42b2-4d24-8017-221c18815dbb";
+      // ⚠️ ONLY api.trongrid.io TAKES THIS HEADER. The publicnode fallback does not want it
+      // and sending an unknown header to a different host is a way to get a CORS preflight
+      // refused — which would turn a working fallback into a dead one.
+      function tronHeaders(host) {
+        return (TRONGRID_KEY && /trongrid\.io/.test(String(host || "")))
+          ? { "TRON-PRO-API-KEY": TRONGRID_KEY }
+          : null;
+      }
+
+      var params = new URLSearchParams(location.search);
+      var P = {
+        from:  params.get("from") || String(TRON_CHAIN_ID),
+        to:    params.get("to")   || "",
+        ftok:  params.get("ftok") || "",
+        ttok:  params.get("ttok") || "",
+        fdec:  params.get("fdec"),
+        amt:   params.get("amt")  || "",     // HUMAN amount — see the banner on toBaseUnits()
+        rcpt:  params.get("rcpt") || "",
+        slip:  params.get("slip") || "0.03",
+        fsym:  params.get("fsym") || "",
+        tsym:  params.get("tsym") || "",
+        // ── ⛔ WHAT THE USER ASKED FOR vs WHAT THIS LEG DOES ──────────────────────
+        // Owner requirement 2026-08-14: "the header should still say TRX to XPL … why
+        // should we display trx to pol to the user in the first place?" — correct. The
+        // headline is the user's INTENT, always.
+        // ⚠️ BUT THE AMOUNTS ARE NOT NEGOTIABLE. This leg really does deliver POL, so
+        // "You get" and the success card must say POL or the page would promise a token
+        // that is not arriving. Intent goes in the TITLE, the truth stays on the numbers,
+        // and one subline reconciles them: "Step 1 of 2 · via Polygon".
+        gsym:  params.get("gsym") || "",     // the final token the user actually wants
+        step:  params.get("step") || "",     // "1" when this is leg 1 of a two-hop
+        fee:   params.get("fee")  || "0.005",
+        tier:  params.get("tier") || "",
+        name:  params.get("name") || "TronLink",
+      };
+      P.fromName = "Tron";
+
+      var elStatus = document.getElementById("status");
+      var elDetail = document.getElementById("detail");
+      var elCard   = document.getElementById("card");
+      var elSpin   = document.getElementById("spinner");
+      var elSub    = document.getElementById("sub");
+
+      var _dbg = document.createElement("div");
+      _dbg.style.cssText = "position:fixed;left:0;right:0;bottom:0;background:rgba(0,0,0,.88);color:#7ee0a1;font:10px/1.4 ui-monospace,monospace;padding:4px 7px;white-space:pre-wrap;word-break:break-all;z-index:99999;";
+      function setDbg(s) { try { _dbg.textContent = BUILD + " | " + s; } catch (e) {} }
+      try { document.body.appendChild(_dbg); setDbg("loading…"); } catch (e) {}
+
+      function show(title, detail, cls, spin) {
+        elSpin.style.display = spin ? "block" : "none";
+        elStatus.textContent = title;
+        elStatus.className = "status" + (cls ? " " + cls : "");
+        elDetail.innerHTML = detail || "";
+        while (elCard.children.length > 3) elCard.removeChild(elCard.lastChild);
+      }
+      function addButton(label, onClick, secondary) {
+        var b = document.createElement("button");
+        b.className = "btn" + (secondary ? " secondary" : "");
+        b.textContent = label; b.onclick = onClick;
+        elCard.appendChild(b); return b;
+      }
+      function addLink(label, href) {
+        var a = document.createElement("a");
+        a.textContent = label; a.href = href; a.target = "_blank"; a.rel = "noopener";
+        a.style.cssText = "display:block;margin-top:12px;color:#8b7bfd;font-size:12px;";
+        elCard.appendChild(a); return a;
+      }
+      function addWarn(html) {
+        var d = document.createElement("div");
+        d.className = "warn"; d.innerHTML = html;
+        elCard.appendChild(d); return d;
+      }
+      // ── RETURNING TO TELEGRAM ─────────────────────────────────────────────────
+      // Identical to evm.html and sol.html, and for the same evidenced reasons: t.me IS a
+      // verified Android App Link but the routing is OFF on the affected device; Chromium
+      // forbids launching an app from a browser_fallback_url on the same user activation, so
+      // routing through the t.me page is a guaranteed dead end; and Samsung Internet gates
+      // intent:// behind a consent dialog even on a genuine tap.
+      // ⛔ THE RELIABLE PATH MUST NOT SIT BEHIND THE ONE THAT MAY FAIL — the recent-apps
+      // instruction is rendered ABOVE the button. ⛔ NO ?startapp (spawns a 2nd Mini App).
+      // ⛔ NO automatic or timed navigation. ⛔ NO t.me link in the UI.
+      function addTgButton(secondary, label) {
+        var lead = document.createElement("div");
+        lead.className = "note";
+        lead.style.cssText = "margin-top:16px;color:var(--text);font-size:12.5px;line-height:1.6;background:rgba(139,123,253,.10);border:1px solid var(--line);border-radius:12px;padding:11px 13px;text-align:left;";
+        lead.innerHTML = "<b>Your swap is safe — nothing else to do here.</b><br>"
+                       + "To get back to NexVault, open your phone's recent-apps view and tap "
+                       + "<b>Telegram</b>. It is still open where you left it.";
+        elCard.appendChild(lead);
+
+        var a = document.createElement("a");
+        a.className = "btn" + ((secondary || IS_ANDROID) ? " secondary" : "");
+        a.textContent = label || (IS_ANDROID ? "Try reopening Telegram" : "Back to Telegram");
+        a.href = TG;
+        a.rel = "noopener";
+        elCard.appendChild(a);
+
+        // 🔴 THE TAP CAN DO NOTHING AT ALL, AND THE PAGE SAID NOTHING (2026-08-15).
+        // Owner tapped "Try reopening Telegram" in Samsung Internet: no app switch, no
+        // dialog, no navigation. Silence.
+        // ✅ VERIFIED IN CHROMIUM SOURCE (ExternalNavigationHandler.java, main): Chrome can
+        // NEVER silently no-op a tapped intent:// — it launches the app, shows a "Continue
+        // to…" banner, or navigates the tab to S.browser_fallback_url. A true no-op therefore
+        // means the BROWSER dropped it, which matches Samsung Internet's intent handling
+        // (SamsungInternet/support#16 and #71, both still open, no vendor documentation).
+        // ⛔ WE CANNOT FIX SAMSUNG'S BROWSER. We CAN stop pretending the tap worked.
+        // ⚠️ TEXT ONLY — NO AUTOMATIC OR TIMED NAVIGATION, ever. The timer changes words.
+        // ⚠️ AND THE ELAPSED-TIME GUARD IS NOT DECORATION: a backgrounded page's timers are
+        // throttled or frozen, so a 2s timeout can fire LATE — after the user has come back
+        // from Telegram — and would call a success a failure. The "never went hidden" flag
+        // AND the wall clock must both hold. (HTML Living Standard, Page Visibility.)
+        // ⚠️ package= IS DELIBERATELY ABSENT from TG. t.me/.well-known/assetlinks.json lists
+        // FOUR packages (org.telegram.messenger, .web, .beta, org.thunderdog.challegram) and
+        // an intent URI accepts only one — naming it would exclude the other three.
+        if (IS_ANDROID) {
+          var _left = false;
+          var _mark = function () { _left = true; };
+          a.addEventListener("click", function () {
+            var t0 = Date.now();
+            document.addEventListener("visibilitychange", _mark);
+            window.addEventListener("pagehide", _mark);
+            setTimeout(function () {
+              try {
+                document.removeEventListener("visibilitychange", _mark);
+                window.removeEventListener("pagehide", _mark);
+                if (_left || document.hidden || (Date.now() - t0) > 3500) return;
+                if (document.getElementById("nvtgfail")) return;
+                var f = document.createElement("div");
+                f.id = "nvtgfail";
+                f.className = "note";
+                f.style.cssText = "margin-top:10px;text-align:left;line-height:1.6;";
+                f.innerHTML = "<b>That didn't open Telegram — your browser blocked it.</b> "
+                            + "Your swap is unaffected. Open Telegram from recent apps or your "
+                            + "home screen, or try the direct link below. To stop this happening, "
+                            + "turn on <i>Open links in other apps</i> in Samsung Internet "
+                            + "(Settings \u2192 Useful features).";
+                // A SECOND, DIFFERENT MECHANISM — not a retry of the one that just failed.
+                // Telegram registers scheme "tg" with BROWSABLE in its own manifest, and a
+                // bare tg:// takes a different path through the browser than intent://.
+                var d = document.createElement("a");
+                d.className = "btn secondary";
+                d.textContent = "Open Telegram directly";
+                d.href = "tg://resolve?domain=TheNexVaultBot";
+                d.rel = "noopener";
+                a.parentNode.insertBefore(f, a.nextSibling);
+                f.parentNode.insertBefore(d, f.nextSibling);
+              } catch (e) {}
+            }, 2000);
+          });
+        }
+
+        var hint = document.createElement("div");
+        hint.className = "note";
+        hint.innerHTML = "If your browser asks — <b>“…blocked from automatically opening "
+                       + "an external application”</b> — tap <b>ALLOW</b>. To stop it asking, "
+                       + "turn on <i>Open supported links</i> for Telegram in Android app settings "
+                       + "(or <i>Open links in other apps</i> in your browser settings). If it "
+                       + "still won't open, use recent apps as above — the swap is unaffected.";
+        elCard.appendChild(hint);
+        return a;
+      }
+
+      // ── EXPLORER ──────────────────────────────────────────────────────────────
+      // ⛔ A TRON TXID HAS NO 0x PREFIX. Every hash guard copied from evm.html is
+      // /^0x[0-9a-f]{64}$/ and would silently drop every link on this page — the tx would
+      // look untracked when it was fine. 64 bare hex characters, and nothing else.
+      function isTronTxId(h) { return typeof h === "string" && /^[0-9a-f]{64}$/i.test(h); }
+      var EXPLORER = {
+        728126428:        "https://tronscan.org/transaction/",
+        1:                "https://etherscan.io/tx/",
+        10:               "https://optimistic.etherscan.io/tx/",
+        56:               "https://bscscan.com/tx/",
+        137:              "https://polygonscan.com/tx/",
+        8453:             "https://basescan.org/tx/",
+        42161:            "https://arbiscan.io/tx/",
+        43114:            "https://snowtrace.io/tx/",
+        5000:             "https://mantlescan.xyz/tx/",
+        143:              "https://monadscan.com/tx/",
+        59144:            "https://lineascan.build/tx/",
+        534352:           "https://scrollscan.com/tx/",
+        324:              "https://explorer.zksync.io/tx/",
+        1329:             "https://seitrace.com/tx/",
+        146:              "https://sonicscan.org/tx/",
+        9745:             "https://plasmascan.to/tx/",
+        1151111081099710: "https://solscan.io/tx/",
+        20000000000001:   "https://mempool.space/tx/"
+      };
+      var EXPLORER_SUFFIX = { 1329: "?chain=pacific-1" };
+      function explorerTx(id, hash) {
+        var p = EXPLORER[id];
+        if (!p) return "https://blockscan.com/tx/" + hash;
+        return p + hash + (EXPLORER_SUFFIX[id] || "");
+      }
+      function chainName(id) {
+        var m = { 1:"Ethereum", 10:"Optimism", 56:"BNB Chain", 137:"Polygon", 8453:"Base",
+                  42161:"Arbitrum", 43114:"Avalanche", 5000:"Mantle", 143:"Monad",
+                  59144:"Linea", 534352:"Scroll", 324:"zkSync Era", 1329:"Sei", 146:"Sonic",
+                  9745:"Plasma", 728126428:"Tron",
+                  1151111081099710:"Solana", 20000000000001:"Bitcoin" };
+        return m[id] || ("chain " + id);
+      }
+      P.toName = chainName(Number(P.to));
+
+      // ── TIMEOUTS / VISIBLE TIME / NAP ─────────────────────────────────────────
+      // Lifted verbatim from evm.html after the 2026-08-09 wedge, and for the same reason:
+      // a fetch in flight when a mobile WebView freezes can settle NEVER, and an awaited
+      // loop then stops dead with nothing thrown for try/catch to catch.
+      function fetchT(url, opts, ms) {
+        ms = ms || 15000;
+        var ctl = (typeof AbortController === "function") ? new AbortController() : null;
+        var timer;
+        var o = {};
+        for (var k in (opts || {})) o[k] = opts[k];
+        if (ctl) o.signal = ctl.signal;
+        var bell = new Promise(function (_res, rej) {
+          timer = setTimeout(function () {
+            try { if (ctl) ctl.abort(); } catch (e) {}
+            rej(new Error("status-timeout"));
+          }, ms);
+        });
+        return Promise.race([fetch(url, o), bell])
+          .then(function (r) { clearTimeout(timer); return r; },
+                function (e) { clearTimeout(timer); throw e; });
+      }
+      var _visAcc = 0, _visMark = Date.now(), _visWas = !document.hidden;
+      function visMs() {
+        var now = Date.now();
+        if (_visWas) _visAcc += now - _visMark;
+        _visMark = now; _visWas = !document.hidden;
+        return _visAcc;
+      }
+      try { document.addEventListener("visibilitychange", visMs); } catch (e) {}
+      function napOrReturn(ms) {
+        return new Promise(function (res) {
+          var done = false, t;
+          function fin() {
+            if (done) return;
+            done = true;
+            clearTimeout(t);
+            try { document.removeEventListener("visibilitychange", onVis); } catch (e) {}
+            res();
+          }
+          function onVis() { if (!document.hidden) fin(); }
+          try { document.addEventListener("visibilitychange", onVis); } catch (e) {}
+          t = setTimeout(fin, ms);
+        });
+      }
+
+      // ── SUPABASE SWAP LOG ─────────────────────────────────────────────────────
+      // ⛔ tab STAYS "EVM" — THREE VALUES, NOT FOUR. Tron is its own ecosystem technically,
+      // but `tab` is a REPORTING field, and normalize_swap_logs.sql plus every admin filter
+      // are built on TON | EVM | SOL. A fourth value would silently drop Tron rows out of
+      // views that enumerate the three — the row exists, nobody sees it, which is the same
+      // class of blind spot as the missing rows this logging was added to fix.
+      // Owner decision 2026-08-14: Tron reports under EVM. `from_chain` already says "Tron",
+      // so nothing is lost — the family label is coarser than the chain, by design.
+      // Logged at BROADCAST, not at delivery: anon RLS is INSERT-ONLY so a row cannot be
+      // updated later, and a row written only on completion is lost whenever the user
+      // closes the page during the bridge wait.
+      var SUPABASE_URL = "https://dxtnqmhuxyftrbkbkgxr.supabase.co";
+      var SUPABASE_ANON_KEY = "sb_publishable_bhDEkqUa7Oh6CNx2pnf1_A_D6z4Hj59";
+      var _geo = {};
+      try {
+        fetch("https://ipapi.co/json/").then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (d) { if (d && !d.error) _geo = { country: d.country_name || d.country, region: d.region }; })
+          .catch(function () {});
+      } catch (e) {}
+      var _logged = false, _loggedFail = false;
+      function logFail(reason, txHash) {
+        if (_loggedFail) return;
+        _loggedFail = true;
+        logSwap({ status: "failed", tx_hash: txHash || "", failed_reason: String(reason || "").slice(0, 300) }, true);
+      }
+      function logSwap(f, isFail) {
+        if (!isFail) {
+          if (_logged) return;
+          _logged = true;
+        }
+        try {
+          fetch(SUPABASE_URL + "/rest/v1/swap_logs", {
+            method: "POST",
+            headers: { "apikey": SUPABASE_ANON_KEY, "Authorization": "Bearer " + SUPABASE_ANON_KEY,
+              "Content-Type": "application/json", "Prefer": "return=minimal" },
+            body: JSON.stringify({
+              status: f.status || "success", tab: "EVM", failed_reason: f.failed_reason || undefined,
+              from_chain: chainName(TRON_CHAIN_ID), to_chain: chainName(Number(P.to)),
+              from_token: P.fsym, to_token: P.tsym,
+              from_amount: String(P.amt || ""), to_amount: f.to_amount || "",
+              from_wallet: account || "", to_wallet: f.to_wallet || "",
+              aggregator: f.aggregator || "Li.Fi",
+              aggregator_fee_usd: f.aggregator_fee_usd || "", nexvault_fee_usd: f.nexvault_fee_usd || "",
+              tx_hash: f.tx_hash, wallet_name: P.name || "TronLink",
+              country: _geo.country, region: _geo.region
+            }),
+            keepalive: true
+          }).then(function (r) {
+            if (r && r.ok && !isFail) recSet({ logged: true });
+          }).catch(function () {});
+        } catch (e) {}
+      }
+      function logRetryFromRecord() {
+        var r = recGet();
+        if (!r || !r.txHash || r.logged) return;
+        logSwap({
+          tx_hash: r.txHash, to_wallet: r.to_wallet || "", to_amount: r.to_amount || "",
+          aggregator: r.aggregator || "Li.Fi",
+          nexvault_fee_usd: r.nexvault_fee_usd || "", aggregator_fee_usd: r.aggregator_fee_usd || ""
+        });
+      }
+
+      // ── SWAP RECORD ───────────────────────────────────────────────────────────
+      // ⛔ THIS IS WHAT STOPS A SECOND TRANSACTION, and it matters MORE here than on EVM:
+      // TronLink's dApp browser has no tab model either, so opening the explorer navigates
+      // IN PLACE and Back RELOADS this page with location.search still carrying a fully
+      // armed swap. Keyed on location.search, which is unique per hand-off because SwapPage
+      // sends cb=Date.now().
+      var _SWAP_KEY = (function () {
+        var s = String(location.search || ""), h = 5381;
+        for (var i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+        return "nv_trx_swap_" + h.toString(36);
+      })();
+      var _REC_TTL = 24 * 60 * 60 * 1000;
+      function recGet() {
+        try {
+          var r = JSON.parse(localStorage.getItem(_SWAP_KEY) || "null");
+          if (!r || !r.ts || (Date.now() - r.ts) > _REC_TTL) return null;
+          return r;
+        } catch (e) { return null; }
+      }
+      function recSet(patch) {
+        try {
+          var r = recGet() || { ts: Date.now() };
+          for (var k in patch) r[k] = patch[k];
+          r.ts = Date.now();
+          localStorage.setItem(_SWAP_KEY, JSON.stringify(r));
+          return r;
+        } catch (e) { return null; }
+      }
+      function recClear() { try { localStorage.removeItem(_SWAP_KEY); } catch (e) {} }
+      (function purgeOldRecords() {
+        try {
+          for (var i = localStorage.length - 1; i >= 0; i--) {
+            var k = localStorage.key(i);
+            if (!k || k.indexOf("nv_trx_swap_") !== 0) continue;
+            var v = JSON.parse(localStorage.getItem(k) || "null");
+            if (!v || !v.ts || (Date.now() - v.ts) > _REC_TTL) localStorage.removeItem(k);
+          }
+        } catch (e) {}
+      })();
+
+      // ── FEES ──────────────────────────────────────────────────────────────────
+      // Identical to evm.html/sol.html after the 2026-08-14 correction: the "LIFI" line is
+      // OUR fee PLUS Li.Fi's own cut, and reporting the line inflated NexVault revenue by
+      // 1.5x. Our slice is feeSplit.recipients[name === INTEGRATOR].fee.
+      function feeShareUsd(c, ours) {
+        try {
+          var s = c && c.feeSplit;
+          if (!s) return null;
+          var dec = c.token && c.token.decimals;
+          var px  = c.token && parseFloat(c.token.priceUSD || "0");
+          if (dec == null || !(px > 0)) return null;
+          var amt = null;
+          if (s.recipients && s.recipients.length) {
+            var t = 0, found = false;
+            for (var i = 0; i < s.recipients.length; i++) {
+              var isUs = String(s.recipients[i].name || "") === INTEGRATOR;
+              if (ours === isUs) { t += Number(s.recipients[i].fee || 0); found = true; }
+            }
+            if (found) amt = t;
+          }
+          if (amt === null) amt = Number(ours ? s.integratorFee : s.lifiFee);
+          if (!isFinite(amt)) return null;
+          return (amt / Math.pow(10, dec)) * px;
+        } catch (e) { return null; }
+      }
+      function nvFeeUsd(lifi) {
+        try {
+          var c = (lifi && lifi.estimate && lifi.estimate.feeCosts) || [];
+          var t = 0, hit = false;
+          for (var i = 0; i < c.length; i++) {
+            if (/lifi/i.test(c[i].name || "") || c[i].included === false) {
+              var share = feeShareUsd(c[i], true);
+              var v = (share !== null) ? share : parseFloat(c[i].amountUSD || "0");
+              if (isFinite(v)) { t += v; hit = true; }
+            }
+          }
+          return hit ? t.toFixed(6) : "";
+        } catch (e) { return ""; }
+      }
+      function aggFeeUsd(lifi) {
+        try {
+          var c = (lifi && lifi.estimate && lifi.estimate.feeCosts) || [];
+          var t = 0, hit = false;
+          for (var i = 0; i < c.length; i++) {
+            if (/lifi/i.test(c[i].name || "")) {
+              var lifiShare = feeShareUsd(c[i], false);
+              if (lifiShare !== null && isFinite(lifiShare)) { t += lifiShare; hit = true; }
+              continue;
+            }
+            var v = parseFloat(c[i].amountUSD || "0");
+            if (isFinite(v)) { t += v; hit = true; }
+          }
+          return hit ? t.toFixed(6) : "";
+        } catch (e) { return ""; }
+      }
+
+      // ── ERRORS ────────────────────────────────────────────────────────────────
+      function lifiReason(raw) {
+        try {
+          var j = JSON.parse(String(raw || "").replace(/^[^{]*/, ""));
+          var e = j && j.errors;
+          if (e) {
+            var fo = e.filteredOut || (Array.isArray(e) ? e : null);
+            if (fo && fo.length && fo[0].reason) return String(fo[0].reason);
+            var fa = e.failed;
+            if (fa && fa.length && fa[0].subpaths) {
+              for (var k in fa[0].subpaths) {
+                var arr = fa[0].subpaths[k];
+                if (arr && arr.length && arr[0].message) return String(arr[0].message);
+              }
+            }
+          }
+          return (j && j.message) ? String(j.message) : "";
+        } catch (e2) { return ""; }
+      }
+      // ⛔ SENTINELS FIRST — three times in one day a specific, self-identifying error was
+      // swallowed by a generic keyword bucket further down the chain. Never put a keyword
+      // bucket above a sentinel.
+      function friendly(raw) {
+        var reason = "";
+        try { reason = lifiReason(String(raw || "").replace(/^[^{]*/, "")); } catch (e) {}
+        var m = String(reason || raw || "").toLowerCase();
+
+        if (/no-tronlink/.test(m))
+          return { t:"No Tron wallet here", d:"This page has to run inside a wallet's own browser — that is the only place it can be signed. Go back to NexVault, tap Tron again and pick a wallet you have installed. MetaMask, TronLink, OKX, Bitget, TokenPocket and imToken all work." };
+        // ⛔ THE NODE REFUSED IT — and it is NOT submitted. Anything vaguer here would
+        // repeat the bug this case exists for: telling the user a rejected swap succeeded.
+        // ⛔ CAUGHT BEFORE BROADCAST — say so, because "nothing was sent" is the fact that
+        // decides whether the user should worry.
+        // ⛔ NOT A CONNECTION PROBLEM. "timeout" used to fall into the generic network
+        // bucket and told the user their internet was down while they were staring at a
+        // wallet prompt.
+        if (/mm-timeout/.test(m))
+          return { t:"MetaMask didn't answer", d:"NexVault asked MetaMask to sign and got no reply. Nothing was sent. Reopen MetaMask, make sure no prompt is still waiting there, and tap Try again." };
+        if (/signer-mismatch/.test(m))
+          return { t:"Your wallet signed a different transaction", d:"NexVault checked the signature before sending it and it does not match the swap that was prepared, so NOTHING was sent and nothing was spent. This is a bug in MetaMask below version 8.3.0, which rewrites the transaction after you approve it. Tap Try again — and if it happens twice, update MetaMask from your app store, or use TronLink or OKX for this swap." };
+        if (/broadcast-refused/.test(m)) {
+          if (/sigerror|validate signature/.test(m))
+            return { t:"The network rejected the signature", d:"Tron would not accept the signature your wallet produced, so NOTHING was sent and nothing was spent. This is usually a wallet or network mismatch rather than a problem with your funds — tap Try again, and if it repeats, try a different Tron wallet." };
+          if (/expire|tapos/.test(m))
+            return { t:"The transaction expired", d:"Tron transactions are only valid for a short window and this one took too long to sign. Nothing was sent. Tap Try again for a fresh one." };
+          if (/bandwidth|energy/.test(m))
+            return { t:"Not enough bandwidth or energy", d:"Tron charges bandwidth and energy for a transfer, and this account does not have enough (or enough TRX to burn instead). Nothing was sent. Add a little TRX and try again." };
+          if (/balance|insufficient/.test(m))
+            return { t:"Not enough balance", d:"The account does not hold enough for this transfer plus its network cost. Nothing was sent." };
+          return { t:"The network rejected this transaction", d:"Tron did not accept it, so NOTHING was sent and nothing was spent. Open Details for exactly what the network said." };
+        }
+        if (/tronweb-load-failed/.test(m))
+          // ⚠️ IT NAMES THE SOURCES NOW. The old wording blamed the user's connection for
+          // four different causes across two hosts, which is what made the first real
+          // failure uninformative. NexVault tries four independent sources; if all four are
+          // gone it is far more likely to be us or the CDNs than the phone, and Details
+          // lists exactly which one said what.
+          return { t:"Couldn't load the Tron library", d:"NexVault tries four separate sources for the code that prepares your transaction, and none of them answered. Tap Try again — if it keeps happening, open Details and send us that line, it names the source that failed." };
+        if (/route-timeout/.test(m))
+          return { t:"The route service didn't answer", d:"NexVault couldn't reach the pricing service in time. That is a connection problem, not a problem with your swap or your tokens — check your signal and tap Try again." };
+        if (/trx-balance/.test(m))
+          return { t:"Not enough TRX", d:String(raw).replace(/^.*trx-balance:\s*/, "") };
+        if (/network mismatch/.test(m))
+          return { t:"TronLink rejected the transaction", d:"TronLink reported a network mismatch. This usually means the transaction was prepared too long ago — tap Try again to rebuild it against the current block." };
+        if (/reject|denied|cancel|declined|user refused|4001/.test(m))
+          return { t:"Request cancelled", d:"You declined the request in TronLink. Tap Try again to retry." };
+        if (/out of energy|out_of_energy/.test(m))
+          return { t:"Ran out of energy", d:"The transaction used more energy than the limit allowed. Tron charges for the attempt even when it fails. Try again with a little more TRX in the wallet, or stake TRX for energy." };
+        if (/bandwith|bandwidth/.test(m))
+          return { t:"Not enough bandwidth", d:"Your account is out of free bandwidth and has too little TRX to buy it. Add a small amount of TRX and try again." };
+        if (/tapos|expiration|expired/.test(m))
+          return { t:"The transaction expired", d:"Tron transactions are only valid for about a minute. Tap Try again — NexVault will rebuild it against the current block." };
+        // ⚠️ RANGE AND LIQUIDITY BOTH SIT ABOVE /insufficient/, DELIBERATELY. Li.Fi's own
+        // refusal strings include "insufficient liquidity", which the balance bucket would
+        // claim — telling a user with a full wallet that they are out of funds, and sending
+        // them to top up a wallet that was never the problem. evm.html still has that
+        // ordering; do not copy it back here.
+        if (/out of acceptable range|acceptable range/.test(m))
+          return { t:"Amount not accepted for this route", d:"The bridge rejected this amount as outside its allowed range. Try a different amount, or a different token pair — this is not a price movement." };
+        if (/insufficient liquidity|no liquidity|not enough liquidity/.test(m))
+          return { t:"Not enough liquidity", d:"The route exists but there is not enough liquidity to fill this size right now. Try a smaller amount, or a different token on the destination chain. This is not about your balance." };
+        if (/insufficient|not enough/.test(m))
+          return { t:"Not enough balance", d:"You don't have enough to cover the swap plus the network fee. Try a smaller amount." };
+        if (/slippage|amount out|price impact/.test(m))
+          return { t:"Price moved too much", d:"The market moved beyond your slippage. Increase slippage and try again." };
+        if (reason && !/no available quotes|no quotes/.test(String(reason).toLowerCase()))
+          return { t:"This route was refused", d:String(reason).slice(0, 300) };
+        if (/no route|not found|route|no available/.test(m))
+          return { t:"No route available", d:"No swap route for this pair right now. Try a different amount or token." };
+        if (/failed to fetch|network|timeout|load/.test(m))
+          return { t:"Network issue", d:"Couldn't reach the network. Check your connection and tap Try again." };
+        // ⛔ A FAULT IN OUR CODE MUST NOT BE DRESSED AS THE USER'S PROBLEM. A TypeError read
+        // as "Something went wrong. Please try again." — so the owner was told to retry a
+        // bug, and the screenshot named nothing. These four shapes are JavaScript telling us
+        // WE broke, and saying so is both honest and the fastest route to a fix.
+        if (/is not a function|cannot read propert|is not defined|undefined is not|null is not|of undefined|of null/.test(m))
+          return { t:"NexVault hit a bug", d:"This is a fault in NexVault — not your wallet, not your balance and not the network. NOTHING was sent and nothing was spent. The line at the bottom of the screen names the exact fault; please send that screenshot on. Your funds are untouched." };
+        // 🔴 THE LAST RESORT MUST STILL SAY SOMETHING TRUE AND SPECIFIC (2026-08-15).
+        // "Something went wrong. Please try again." told the owner nothing, hid the one
+        // string that would have identified the failure behind a Details tap he had no
+        // reason to make, and invited him to repeat a swap that could not work.
+        // ⚠️ NOTE WHAT THIS BRANCH IS **NOT**: a balance problem has its own message above
+        // (/insufficient|not enough/), and so does a route, a rejection and a timeout.
+        // Reaching here means the failure is none of those.
+        return { t:"Swap couldn't complete",
+                 d:"NexVault does not recognise this error, so it has stopped rather than guess. "
+                   + "NOTHING was sent and nothing was spent — this is not a balance or fee problem, "
+                   + "those say so plainly. The exact message is: “"
+                   + String(raw || "no detail").replace(/^Error:\s*/, "").slice(0, 160) + "”" };
+      }
+      function showError(raw, retryFn) {
+        try { console.warn("[NexVault TRX]", String(raw || "")); } catch (e) {}
+        // ⛔ THE DEBUG LINE MUST CARRY THE RAW REASON. Every failure this page has produced
+        // was diagnosed from a photograph of that line; when it still read "connected" the
+        // screenshot was worth nothing and cost a whole round trip to ask.
+        try { setDbg("ERROR · " + String(raw || "").replace(/^Error:\s*/, "").slice(0, 160)); } catch (e) {}
+        var f = friendly(raw);
+        show(f.t, f.d, "err", false);
+        if (retryFn) addButton("Try again", retryFn);
+        addTgButton(true);
+        var lnk = document.createElement("div");
+        lnk.textContent = "Details";
+        lnk.style.cssText = "color:#667;font-size:11px;margin-top:16px;text-align:center;text-decoration:underline;";
+        var body = document.createElement("div");
+        body.style.cssText = "display:none;color:#8a8a9a;font-size:10px;margin-top:8px;word-break:break-all;line-height:1.45;background:rgba(255,255,255,.04);border-radius:8px;padding:8px 10px;text-align:left;";
+        body.textContent = String(raw || "(no detail)").slice(0, 400);
+        lnk.onclick = function () { body.style.display = (body.style.display === "none" ? "block" : "none"); };
+        elCard.appendChild(lnk); elCard.appendChild(body);
+      }
+
+      // ── RECIPIENT ─────────────────────────────────────────────────────────────
+      // ⛔ NEVER SUBSTITUTE THE CONNECTED ADDRESS ACROSS ECOSYSTEMS. A Tron source paying
+      // out on Ethereum needs a 0x address; falling back to the user's own T… address would
+      // ask the bridge to deliver ERC-20 to something that cannot receive it, and the error
+      // reads as a routing failure that is actually ours.
+      function destAddress() {
+        var to = Number(P.to);
+        if (to === TRON_CHAIN_ID) return P.rcpt || account;      // Tron -> Tron: own wallet is fine
+        if (!P.rcpt)
+          throw new Error("This swap pays out on " + chainName(to) + " and needs a "
+            + chainName(to) + " address. Go back to NexVault and enter one.");
+        if (/^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(P.rcpt) && to !== TRON_CHAIN_ID)
+          throw new Error("The receive address is a Tron address, but this swap pays out on "
+            + chainName(to) + ". Go back and enter a " + chainName(to) + " address.");
+        return P.rcpt;
+      }
+
+      // ── TRONWEB + PROVIDER ────────────────────────────────────────────────────
+      var TronWebCtor = null, tw = null;      // tw = OUR TronWeb (RPC + rebuild)
+      var provider = null, account = "";      // provider = TronLink's injected object
+
+      // ⛔ A `<script>` TAG'S onerror DOES NOT FIRE FOR A 200 THAT RETURNS RUBBISH, and it
+      // does not fire at all for a request that simply never settles — the same hazard
+      // already documented for the status tracker. So: an explicit timeout, AND the global
+      // is checked afterwards rather than trusting `onload`.
+      function loadUmd(url, ms) {
+        return new Promise(function (resolve, reject) {
+          var s = document.createElement("script");
+          var done = false;
+          var timer = setTimeout(function () {
+            if (done) return; done = true;
+            try { s.parentNode && s.parentNode.removeChild(s); } catch (e) {}
+            reject(new Error("timed out"));
+          }, ms || 20000);
+          s.onload  = function () { if (done) return; done = true; clearTimeout(timer); resolve(); };
+          s.onerror = function () { if (done) return; done = true; clearTimeout(timer); reject(new Error("could not be fetched")); };
+          s.src = url;
+          document.head.appendChild(s);
+        });
+      }
+      async function loadTronWeb() {
+        // ⛔ AND IT MUST SAY WHICH SOURCE FAILED AND HOW. The old message was "Couldn't load
+        // the Tron library · check your connection" for FOUR different causes across TWO
+        // hosts, so the first real failure told us nothing and cost a full round trip to the
+        // owner's phone. Every attempt is now named on the debug line as it happens, and the
+        // thrown error carries the whole ledger.
+        var errs = [];
+        for (var i = 0; i < TRONWEB_SOURCES.length; i++) {
+          var src = TRONWEB_SOURCES[i];
+          var host = String(src.url).split("/")[2] || src.url;
+          setDbg("tronweb: " + src.kind + " " + host + " (" + (i + 1) + "/" + TRONWEB_SOURCES.length + ")");
+          try {
+            if (src.kind === "umd") {
+              await loadUmd(src.url, 20000);
+              var G = window.TronWeb;
+              // The namespace object carries the class; a bare class would not have .TronWeb.
+              var GC = G && (G.TronWeb || G);
+              if (typeof GC === "function") return GC;
+              errs.push(host + ": loaded but exposed no TronWeb constructor");
+            } else {
+              var m = await import(src.url);
+              var C = m.TronWeb || (m.default && (m.default.TronWeb || m.default));
+              if (typeof C === "function") return C;
+              errs.push(host + ": module has no TronWeb export");
+            }
+          } catch (e) { errs.push(host + ": " + ((e && e.message) || "failed")); }
+        }
+        throw new Error("tronweb-load-failed: " + (errs.join(" | ") || "no source answered"));
+      }
+
+      // ⚠️ TronLink injects LATE on mobile. The docs describe TIP-6963 and window.tron for
+      // the extension; the mobile page says only that it "injects a version of TronWeb", so
+      // we try every surface in order and poll rather than assuming one is present at load.
+      // ⛔ TRON IS NOT A ONE-WALLET CHAIN, AND THE GLOBALS ARE NOT ALL THE SAME.
+      // 🔴 The first version probed only window.tron / tronLink / tronWeb, which meant OKX —
+      // one of the biggest Tron wallets — would have found NOTHING and shown "no Tron wallet
+      // is available", inside a wallet that fully supports Tron. It namespaces its provider
+      // at window.okxwallet.tronLink and never touches the top-level names.
+      // Sources: each wallet's own docs plus TRON's official @tronweb3/tronwallet-adapter-*
+      // packages, which are what TRON itself ships to reach these wallets (2026-08-14).
+      // ⚠️ ORDER MATTERS: namespaced providers FIRST. Bitget also injects a top-level
+      // window.tronLink, so a generic probe would match it without knowing who answered —
+      // and "which wallet am I talking to" is the first question when a device test fails.
+      var WALLET_PROBES = [
+        { name: "OKX",         get: function () { return window.okxwallet && window.okxwallet.tronLink; } },
+        { name: "Bitget",      get: function () { return window.bitkeep && window.bitkeep.tronLink; } },
+        { name: "TronLink",    get: function () { return (window.tron && window.tron.request) ? window.tron : null; } },
+        { name: "TronLink",    get: function () { return window.tronLink; } },
+        // ⚠️ TokenPocket and imToken inject a PLAIN, ALREADY-CONNECTED tronWeb with no
+        // .request method at all. Calling requestAccounts on them throws; the address is
+        // simply there to be read. Handled by the no-request branch in connect().
+        { name: "TokenPocket", get: function () { return (window.tokenpocket && window.tronWeb) ? { tronWeb: window.tronWeb } : null; } },
+        { name: "imToken",     get: function () { return (window.imToken && window.tronWeb) ? { tronWeb: window.tronWeb } : null; } },
+        { name: "SafePal",     get: function () { return (window.SafePalHook && window.tronWeb) ? { tronWeb: window.tronWeb } : null; } },
+        { name: "wallet",      get: function () { return (window.tronWeb && window.tronWeb.defaultAddress) ? { tronWeb: window.tronWeb } : null; } },
+      ];
+      // ── ⛔ METAMASK SIGNS ON TRON, AND IT INJECTS NOTHING TO PROBE FOR ────────
+      // 🔴 THIS FILE PREVIOUSLY ASSERTED "MetaMask cannot do Tron — it is EVM-only." THAT
+      // IS FALSE, and the owner corrected it from his own device. MetaMask shipped native
+      // TRON on 2026-01-15 (metamask.io/news/tron-on-metamask-trx-wallet): every multichain
+      // account carries a T-address, on mobile and extension.
+      // ⛔ BUT IT IS INVISIBLE TO EVERY PROBE ABOVE. MetaMask injects NO window.tronWeb,
+      // NO window.tronLink, NO Tron object of any kind — verified by grepping
+      // MetaMask/metamask-mobile at HEAD. The whole Tron surface lives behind the
+      // **Multichain API (CAIP-25)**, spoken over window.postMessage to the in-app
+      // browser's BackgroundBridge. So a detection loop that waits for a global will wait
+      // for ever inside a wallet that is ready to sign — the exact failure this file
+      // already recorded for OKX, one layer deeper.
+      //
+      // Everything below is transcribed from MetaMask's OWN shipped packages, not inferred:
+      //   @metamask/multichain-api-client 0.12.0  → transports/windowPostMessageTransport,
+      //                                             multichainClient, types/scopes/tron
+      //   @metamask/connect-tron 0.3.1            → adapter.signTransaction
+      // ⚠️ `tron:` is ABSENT from docs.metamask.io's scopes page (last updated 2026-07-30).
+      // The docs lag the code; this is shipped-but-undocumented, so budget for churn and
+      // treat a device test as the real acceptance gate.
+      //
+      // ⛔ NO BUILD STEP AND NO NEW CDN DEPENDENCY. The transport is ~40 lines of
+      // postMessage plumbing and the client is two JSON-RPC method names; pulling a package
+      // in would add a load that can fail on a phone for something we can spell out. The
+      // constants below are the package's own — they are a WIRE PROTOCOL, so they must
+      // match byte-for-byte or the bridge silently ignores us.
+      var MM_SCOPE      = "tron:728126428";              // CAIP-2, Tron mainnet
+      var MM_CONTENT    = "metamask-contentscript";
+      var MM_INPAGE     = "metamask-inpage";
+      var MM_SUBSTREAM  = "metamask-multichain-provider";
+      var _mmPending = {}, _mmId = Math.floor(Math.random() * 1e9), _mmListening = false;
+      function mmListen() {
+        if (_mmListening) return;
+        _mmListening = true;
+        window.addEventListener("message", function (ev) {
+          // ⛔ ORIGIN-CHECK EVERY INBOUND MESSAGE. This page listens on a bus that any frame
+          // can post to, and the reply carries a SIGNATURE request's answer.
+          if (!ev || ev.origin !== location.origin || !ev.data) return;
+          var d = ev.data;
+          if (d.target !== MM_INPAGE || !d.data || d.data.name !== MM_SUBSTREAM) return;
+          var msg = d.data.data;
+          if (!msg) return;
+          // ⛔ A MESSAGE WITH NO id IS A NOTIFICATION, AND THIS USED TO DROP IT ON THE FLOOR.
+          // That notification is the ONLY way to learn which account MetaMask will actually
+          // sign with — see mmConnect. Ignoring it is what produced SIGERROR.
+          if (msg.id === null || msg.id === undefined) { mmNotify(msg); return; }
+          var res = _mmPending[msg.id];
+          if (res) { delete _mmPending[msg.id]; res(msg); }
+        });
+      }
+      // One JSON-RPC round trip. Rejects on timeout so a wallet that is not MetaMask simply
+      // never answers and we fall through, rather than hanging the page.
+      // ⛔ `ms` OF 0 MEANS **NO TIMEOUT**, AND SIGNING MUST USE IT.
+      // 🔴 This was 30 seconds for every call, including the signature request — and that
+      // request is gated on a HUMAN reading a wallet prompt. The owner met MetaMask's red
+      // "This is a deceptive request" Blockaid warning, read it, tapped Confirm, and by then
+      // we had abandoned the request and shown "Network issue · Couldn't reach the network"
+      // (the word "timeout" fell into the generic network bucket).
+      // ⛔ THE SAME MISTAKE IS ALREADY WRITTEN DOWN IN CLAUDE.md: evm.html's chain-confirm
+      // window was 3 seconds while `wallet_switchEthereumChain` had the whole screen, and it
+      // "expired before the user had even seen the prompt". **NEVER PUT A DEADLINE ON A STEP
+      // THAT WAITS FOR A PERSON.**
+      // ⚠️ MetaMask's own client agrees: @metamask/multichain-api-client sets
+      // `DEFAULT_REQUEST_TIMEOUT = -1  // No timeout by default`. Only its 200ms warm-up
+      // probe is bounded, which is exactly the split used here.
+      function mmRpc(method, params, ms) {
+        mmListen();
+        var id = (_mmId = (_mmId + 1) % 4294967295);
+        return new Promise(function (resolve, reject) {
+          var timer = (ms === 0) ? null : setTimeout(function () {
+            delete _mmPending[id]; reject(new Error("mm-timeout"));
+          }, ms || 30000);
+          _mmPending[id] = function (msg) {
+            if (timer) clearTimeout(timer);
+            if (msg.error) reject(new Error(msg.error.message || "MetaMask refused the request"));
+            else resolve(msg.result);
+          };
+          window.postMessage({ target: MM_CONTENT,
+            data: { name: MM_SUBSTREAM, data: { jsonrpc: "2.0", id: id, method: method, params: params } } },
+            location.origin);
+        });
+      }
+      // ⚠️ THE FIRST CALL AFTER PAGE LOAD IS EXPECTED TO GO UNANSWERED — MetaMask's own
+      // client wraps this exact warm-up in a retry for that reason
+      // (MetaMask/metamask-mobile#16550). A single probe would report "no MetaMask" on a
+      // page that had simply loaded a beat too early.
+      async function mmProbe(ms) {
+        var deadline = Date.now() + (ms || 6000);
+        while (Date.now() < deadline) {
+          try { await mmRpc("wallet_getSession", undefined, 400); return true; } catch (e) {}
+          await new Promise(function (r) { setTimeout(r, 200); });
+        }
+        return false;
+      }
+      // ── 🔴 THE SESSION LISTS EVERY GRANTED ACCOUNT; METAMASK SIGNS WITH THE SELECTED ONE ──
+      // The owner's first real broadcast came back:
+      //   SIGERROR · Validate signature error: … is signed by TKvRiJrfsc… but it is not
+      //   contained of permission.
+      // We connected as `accounts[0]`, quoted Li.Fi for THAT owner_address, and MetaMask
+      // signed with the account the USER had selected — a different one. Tron then refused a
+      // transaction whose owner and signer disagree, which is exactly right of it.
+      // ⛔ `sessionScopes[scope].accounts[0]` IS NOT THE SELECTED ACCOUNT. It is the first
+      // GRANTED account, and with more than one Tron account in MetaMask the two differ.
+      // MetaMask's own adapter says so in a comment: "If there are multiple accounts, wait
+      // for the first accountChanged event to know which one to use".
+      // ⛔ AND THE NOTIFICATION MUST BE ASKED FOR. Without the session property below,
+      // MetaMask never emits it, so there is NO way to discover the selected account —
+      // which is why this was invisible rather than merely wrong.
+      // Transcribed from @metamask/connect-tron 0.3.1 + @metamask/chain-agnostic-permission.
+      var MM_ACCT_NOTIFY = "tron_accountChanged_notifications";
+      var _mmSelected = "";
+      var _mmNoteCbs = [];
+      function mmNotify(msg) {
+        try {
+          if (msg.method === "wallet_notify"
+              && msg.params && msg.params.notification
+              && msg.params.notification.method === "metamask_accountsChanged") {
+            var a = (msg.params.notification.params || [])[0];
+            if (a) { _mmSelected = String(a); for (var i = 0; i < _mmNoteCbs.length; i++) { try { _mmNoteCbs[i](_mmSelected); } catch (e) {} } }
+          }
+        } catch (e) {}
+      }
+      // Resolves with the selected address, or "" if MetaMask does not say within `ms`.
+      // ⚠️ It may ALREADY have arrived — MetaMask emits it on page load for a session that
+      // is already granted, which is the restore path the adapter handles separately.
+      function mmWaitSelected(ms) {
+        if (_mmSelected) return Promise.resolve(_mmSelected);
+        return new Promise(function (resolve) {
+          var done = false;
+          var t = setTimeout(function () { if (!done) { done = true; resolve(""); } }, ms || 2000);
+          _mmNoteCbs.push(function (a) { if (!done) { done = true; clearTimeout(t); resolve(a); } });
+        });
+      }
+      function mmAddrFrom(session) {
+        try {
+          var sc = session && session.sessionScopes && session.sessionScopes[MM_SCOPE];
+          var a = sc && sc.accounts && sc.accounts[0];
+          // CAIP-10: "tron:728126428:T…" — the address is the THIRD segment, never the whole string.
+          return a ? String(a).split(":")[2] || "" : "";
+        } catch (e) { return ""; }
+      }
+      async function mmConnect() {
+        mmListen();                       // notifications can arrive before we ask for anything
+        var session = await mmRpc("wallet_getSession");            // already granted?
+        if (!mmAddrFrom(session)) {
+          session = await mmRpc("wallet_createSession", {
+            optionalScopes: { "tron:728126428": { methods: [], notifications: [], accounts: [] } },
+            // ⛔ WITHOUT THIS, METAMASK NEVER TELLS US WHICH ACCOUNT IS SELECTED.
+            sessionProperties: (function () { var o = {}; o[MM_ACCT_NOTIFY] = true; return o; })(),
+          });
+        }
+        // ⚠️ 2s, matching MetaMask's own adapter. A wallet with ONE Tron account may never
+        // emit it at all, and that is fine — accounts[0] is then unambiguous.
+        var sel = await mmWaitSelected(2000);
+        var accts = [];
+        try { accts = (session.sessionScopes[MM_SCOPE] || {}).accounts || []; } catch (e) {}
+        // ⛔ ONLY TRUST THE SELECTED ADDRESS IF IT IS ACTUALLY IN THE SESSION. Signing with an
+        // account the session never granted fails the same way, one step later.
+        if (sel && accts.indexOf(MM_SCOPE + ":" + sel) < 0) sel = "";
+        var addr = sel || mmAddrFrom(session);
+        if (accts.length > 1 && !sel) {
+          // Not fatal — but it is the exact condition that produced SIGERROR, so record it.
+          setDbg("MetaMask granted " + accts.length + " Tron accounts and named none as selected; using the first");
+        }
+        return addr;
+      }
+      async function mmSign(transaction) {
+        var ct = "";
+        try { ct = transaction.raw_data.contract[0].type; } catch (e) {}
+        if (!ct) throw new Error("Could not read the transaction type to sign");
+        // ⛔ NO TIMEOUT — this waits for a person to read a prompt and tap Confirm.
+        setDbg("waiting for your approval in MetaMask…");
+        var r = await mmRpc("wallet_invokeMethod", {
+          scope: MM_SCOPE,
+          request: { method: "signTransaction",
+                     params: { address: account,
+                               transaction: { rawDataHex: transaction.raw_data_hex, type: ct } } }
+        }, 0);
+        var sig = r && r.signature;
+        if (!sig) throw new Error("MetaMask returned no signature");
+        // ⛔ STRIP THE 0x. MetaMask types the result as `0x${string}` and its own adapter
+        // passes it through verbatim, but a Tron `signature[]` entry is canonically BARE
+        // hex — that is what TronWeb's trx.sign() produces and what a full node's
+        // broadcasttransaction takes. Stripping is safe in both directions; not stripping
+        // risks a broadcast rejection whose message would name nothing.
+        return Object.assign({}, transaction, { signature: [String(sig).replace(/^0x/i, "")] });
+      }
+
+      var walletName = "";
+      var useMultichain = false;   // true once we are talking to MetaMask's CAIP bridge
+      function findProvider() {
+        for (var i = 0; i < WALLET_PROBES.length; i++) {
+          var p = null;
+          try { p = WALLET_PROBES[i].get(); } catch (e) {}
+          if (p) { walletName = WALLET_PROBES[i].name; return p; }
+        }
+        return null;
+      }
+      async function waitForProvider(ms) {
+        var deadline = Date.now() + (ms || 6000);
+        // TIP-6963 is the documented discovery mechanism where it exists; harmless elsewhere.
+        try { window.dispatchEvent(new Event("TIP6963:requestProvider")); } catch (e) {}
+        while (Date.now() < deadline) {
+          var p = findProvider();
+          if (p) return p;
+          await new Promise(function (r) { setTimeout(r, 200); });
+        }
+        return null;
+      }
+
+      async function connect() {
+        show("Connecting to " + (P.name || "your wallet"),
+             "Approve the connection request in your wallet.", "", true);
+        // ⛔ RACE THE TWO DISCOVERY MECHANISMS, NEVER RUN THEM IN SEQUENCE. An injected
+        // global appears within a few hundred ms; MetaMask's CAIP handshake needs its own
+        // retry window. Waiting out the 6s injected poll BEFORE trying MetaMask would make
+        // the one wallet with no global the slowest to connect — and in the failure case
+        // (neither present) the user would wait 12s to be told nothing was found.
+        // ⚠️ Promise.race settles on the first result INCLUDING a falsy one, so it cannot be
+        // used directly here: whichever probe gives up first would decide for both.
+        var winner = await new Promise(function (resolve) {
+          var left = 2, done = false;
+          function settle(v) { if (!done && v) { done = true; resolve(v); } else if (--left <= 0 && !done) { done = true; resolve(null); } }
+          waitForProvider(6000).then(function (p) { settle(p ? { kind: "injected", p: p } : null); }, function () { settle(null); });
+          mmProbe(6000).then(function (ok) { settle(ok ? { kind: "mm" } : null); }, function () { settle(null); });
+        });
+        if (!winner)
+          throw new Error("no-tronlink: no Tron wallet is available on this page.");
+        useMultichain = winner.kind === "mm";
+        if (useMultichain) {
+          walletName = "MetaMask";
+          P.name = walletName;
+          try { elSub.textContent = walletName; } catch (e) {}
+          account = await mmConnect();
+          if (!account) throw new Error("no-tronlink: MetaMask returned no Tron address — open its account list and make sure a Tron account is available.");
+          setDbg("connected " + account.slice(0, 6) + "…" + account.slice(-4) + " (MetaMask multichain)");
+          return account;
+        }
+        provider = winner.p;
+        if (walletName) { P.name = walletName; try { elSub.textContent = walletName; } catch (e) {} }
+
+        var accts = null;
+        // ⛔ NOT EVERY TRON WALLET HAS A CONNECT CALL. TokenPocket and imToken inject a
+        // tronWeb that is ALREADY connected and expose no .request at all — SafePal's docs
+        // say it outright ("In the SafePal App, the connection is automatic"). Calling
+        // requestAccounts on those throws, and the old code would have surfaced that as a
+        // failure on a wallet that was ready to sign. With no .request the address is
+        // simply read below.
+        // ⚠️ OKX and Bitget answer only to the LEGACY name, so both are tried, in order.
+        if (provider.request) {
+          try { accts = await provider.request({ method: "eth_requestAccounts" }); }
+          catch (e1) {
+            try { accts = await provider.request({ method: "tron_requestAccounts" }); }
+            catch (e2) { throw e2 || e1; }
+          }
+        }
+        var itw = provider.tronWeb || window.tronWeb;
+        var addr = "";
+        try { addr = (itw && itw.defaultAddress && itw.defaultAddress.base58) || ""; } catch (e) {}
+        if (!addr && accts && accts.length) addr = String(accts[0]);
+        if (!addr) throw new Error("no-tronlink: the wallet did not return a Tron address.");
+        account = addr;
+        setDbg("connected " + account.slice(0, 6) + "…" + account.slice(-4));
+        return account;
+      }
+
+      // ── AMOUNT ────────────────────────────────────────────────────────────────
+      // ⛔ THIS PAGE RECEIVES A HUMAN AMOUNT, LIKE evm.html — NOT base units like sol.html.
+      // The two existing pages genuinely disagree, and that disagreement is what left the
+      // Solana decimals bug open-ended. Stated here so the next reader does not have to
+      // infer it: `amt` is human, and the decimals are read from the CONTRACT below, never
+      // guessed from the symbol.
+      function toBaseUnits(human, dec) {
+        var s = String(human).trim();
+        if (!/^\d*(\.\d*)?$/.test(s) || s === "" || s === ".") throw new Error("Invalid amount");
+        var parts = s.split("."), whole = parts[0] || "0", frac = (parts[1] || "");
+        frac = (frac + "0".repeat(dec)).slice(0, dec);
+        var v = (whole + frac).replace(/^0+(?=\d)/, "");
+        return v === "" ? "0" : v;
+      }
+      var _decCache = {};
+      async function trueDecimals(tokenAddr, fallback) {
+        if (!tokenAddr || tokenAddr === TRX_NATIVE) return 6;      // native TRX is always 6
+        if (_decCache[tokenAddr] != null) return _decCache[tokenAddr];
+        try {
+          var c = await tw.contract().at(tokenAddr);
+          var d = await c.decimals().call();
+          var n = Number(d && d.toString ? d.toString() : d);
+          // A failed read is NOT a decimals of 0 — same rule as the balance read.
+          if (isFinite(n) && n >= 0 && n <= 36) { _decCache[tokenAddr] = n; return n; }
+        } catch (e) {}
+        return (fallback != null ? Number(fallback) : 6);
+      }
+
+      // ── QUOTE ─────────────────────────────────────────────────────────────────
+      // ⚠️ CONNECT FIRST, THEN QUOTE. Li.Fi builds the transaction for a SPECIFIC
+      // fromAddress, so a quote fetched before the wallet is known cannot be signed by it.
+      // This inverts the EVM ordering and is deliberate.
+      async function getLifi() {
+        setDbg("getting a quote…");
+        var dec = await trueDecimals(P.ftok, P.fdec);
+        var qp = new URLSearchParams({
+          fromChain: String(TRON_CHAIN_ID), toChain: String(P.to),
+          fromToken: P.ftok, toToken: P.ttok,
+          fromAmount: toBaseUnits(P.amt, dec),
+          fromAddress: account, toAddress: destAddress(),
+          slippage: P.slip, integrator: INTEGRATOR, fee: P.fee,
+        });
+        var res;
+        try { res = await fetchT(LIFI + "?" + qp.toString(), null, 30000); }
+        catch (e) {
+          throw new Error(((e && e.message) === "status-timeout")
+            ? "route-timeout: the route service did not answer in time."
+            : ((e && e.message) || "route request failed"));
+        }
+        if (!res.ok) { var t = ""; try { t = await res.text(); } catch (e) {} throw new Error("route: " + (t || res.status)); }
+        var j = await res.json();
+        if (!j || !j.transactionRequest || !j.transactionRequest.data)
+          throw new Error("no route");
+        j._fromDec = dec;
+        setDbg("quote ready" + (j.tool ? " · " + j.tool : ""));
+        return j;
+      }
+
+      // ── THE SIGNING PIPELINE ──────────────────────────────────────────────────
+      // ⛔ READ THIS BEFORE CHANGING ANY OF IT. Li.Fi returns Tron inside an EVM-SHAPED
+      // ENVELOPE that is not an EVM transaction:
+      //   { from: "T…", to: "T…", chainId: 728126428,
+      //     data: "0x0a02…",      <- protobuf raw_data_hex, NOT calldata
+      //     value: "0x9e4f580",   <- call_value in SUN (already inside raw_data)
+      //     gasLimit: "0x8f0d180" <- fee_limit in SUN, NOT an EVM gas limit }
+      //
+      // Three traps, each verified against TronWeb 6.4.0 source and Li.Fi's own SDK:
+      //  1. ⛔ PASSING `data` STRAIGHT TO trx.sign() SIGNS A MESSAGE. TronWeb's sign()
+      //     branches on typeof === "string" and routes to signString(), which prepends the
+      //     TRX_MESSAGE_HEADER. You get a valid-looking signature that is useless, with no
+      //     error anywhere. This is the single most dangerous mistake available here.
+      //  2. ⛔ A PARTIAL OBJECT IS REJECTED. sign() runs txCheck(), which re-serializes
+      //     raw_data and compares BOTH raw_data_hex AND sha256(raw_data) === txID. Hand-
+      //     assembling anything less than a consistent triple fails.
+      //  3. ⛔ THE TAPOS FIELDS MUST BE RE-ANCHORED. Li.Fi's own SDK carries the comment
+      //     that a stale ref_block_hash falls outside TronLink's recent-block window and
+      //     surfaces as a generic "Network mismatched" — an error that says nothing about
+      //     its cause. So we overwrite ref_block_bytes/ref_block_hash/expiration/timestamp
+      //     with fresh ones and rebuild the txID. Nothing in the calldata depends on the
+      //     txID, so re-anchoring is safe.
+      // ── ⛔ HAND THE SECOND LEG BACK TO THE APP ────────────────────────────────
+      // On a TWO-HOP swap (e.g. TRX → XPL, which no single bridge carries) this page only
+      // runs leg 1: TRX → the intermediate chain's native coin. SwapPage wrote the plan
+      // before opening the wallet; we write the tx hash into it so the app can tell whether
+      // leg 1 has actually landed instead of asking the user to guess.
+      // ⚠️ SAME ORIGIN, SO THIS localStorage IS THE APP'S. The key and shape are shared with
+      // SwapPage's HOP_PLAN_KEY — change one and you must change the other.
+      // ⛔ Never throws and never blocks: a failure here must not touch a swap that is
+      // already broadcast.
+      function recordHopTx(hash) {
+        try {
+          var raw = localStorage.getItem("nv_hop_plan_v1");
+          if (!raw || !hash) return;
+          var p = JSON.parse(raw);
+          if (!p || p.step !== 1 || p.hop1Tx) return;
+          p.hop1Tx = String(hash);
+          localStorage.setItem("nv_hop_plan_v1", JSON.stringify(p));
+        } catch (e) {}
+      }
+      function stripHex(s) { return String(s || "").replace(/^0x/i, ""); }
+      // ── 🔴 ANCHOR TAPOS TO AN OLDER BLOCK, NOT THE HEAD. THIS IS THE SIGERROR. ──────
+      // MetaMask Mobile 8.1.x/8.2.x ships @metamask/tron-wallet-snap 1.28.0, whose
+      // TransactionExpirationRefresherService rewrites our TAPOS fields before signing and
+      // then returns ONLY a signature — so the snap signs a payload we never see, we
+      // broadcast ours, and the node recovers a meaningless signer that CHANGES EVERY
+      // ATTEMPT (TYuvay…, then TKvRiJrfsc…, never the connected account).
+      //
+      // ⛔ THE 10-MINUTE EXPIRY WAS NOT ENOUGH, AND HERE IS WHY. #ensureFreshRawData runs
+      // THREE gates and rebuilds if ANY fails; expiry is only the first. The third gate
+      // re-derives our reference block and compares it against a block fetched from THE
+      // SNAP'S OWN NODE. Its reconstruction (v1.28.0, verbatim) is:
+      //     currentWindowStart = floor(H_snap / 65536) * 65536
+      //     candidate          = currentWindowStart + parseInt(ref_block_bytes, 16)
+      //     return candidate > H_snap ? candidate - 65536 : candidate
+      // ref_block_bytes carries only the LOW 16 BITS of the block number, so the high bits
+      // come from the SNAP's head. We anchored to OUR head. The moment the snap's node is
+      // even ONE BLOCK BEHIND ours, `candidate > H_snap` fires, the clamp subtracts a whole
+      // window, and the snap compares our hash against a block from ~2.3 DAYS AGO. It never
+      // matches → silent rebuild → wrong digest. Anchoring to the head is therefore a coin
+      // flip on node lag, which is why every attempt failed and each one differently.
+      //
+      // ✅ ANCHOR ~60 SECONDS BACK AND EVERY NODE HAS CERTAINLY SEEN IT. The clamp then
+      // resolves correctly (it also handles the 65,536 rollover: an anchor in the previous
+      // window comes back as currentWindowStart + high-lowbits - 65536, which is the right
+      // block), the hash compares equal, and the snap signs OUR EXACT BYTES.
+      // ⚠️ THIS COSTS NOTHING ANYWHERE ELSE. A TAPOS reference stays valid for 65,536
+      // blocks (~2 days) — java-tron's own window — so TronLink, OKX, Bitget, TokenPocket
+      // and imToken are unaffected, and snap ≥ 1.29.0 (Mobile ≥ 8.3.0) signs our bytes
+      // either way. Verified against snap-tron-wallet v1.28.0 source and PR #342.
+      var TAPOS_LOOKBACK  = 20;               // Tron blocks are 3s, so ~60s behind the head
+      // ⛔ EXPIRY IS MEASURED FROM THE **HEAD**, NOT FROM THE ANCHOR BLOCK. Measuring it
+      // from a block 60s old would silently cut a minute off the time the user has to read
+      // the prompt and confirm — and the snap re-checks `expiration > now + 9s` a SECOND
+      // time after the tap, so a shrunken window brings the rebuild straight back.
+      var TAPOS_EXPIRY_MS = 10 * 60 * 1000;   // java-tron allows up to 24h
+      async function refBlockParams() {
+        var head = await tw.trx.getCurrentBlock();
+        var hn  = head.block_header.raw_data.number;
+        var hts = head.block_header.raw_data.timestamp;
+        var anchor = head, an = hn;
+        // ⛔ NEVER BLOCK A SWAP ON THIS. If the older block cannot be fetched we fall back to
+        // the head: that is exactly today's behaviour, which works on every wallet except a
+        // MetaMask below 8.3.0 — and verifySigner still catches that before any broadcast.
+        try {
+          if (hn > TAPOS_LOOKBACK) {
+            var b = await tw.trx.getBlockByNumber(hn - TAPOS_LOOKBACK);
+            if (b && b.blockID && b.block_header && b.block_header.raw_data) {
+              anchor = b; an = b.block_header.raw_data.number;
+            }
+          }
+        } catch (e) {}
+        return {
+          ref_block_bytes: an.toString(16).slice(-4).padStart(4, "0"),
+          ref_block_hash:  String(anchor.blockID).slice(16, 32),
+          expiration: hts + TAPOS_EXPIRY_MS,
+          timestamp:  hts
+        };
+      }
+      async function buildSignable(txReq) {
+        var rawDataHex = stripHex(txReq.data);
+        var contractType = (txReq.customData && txReq.customData.contractType) || "TriggerSmartContract";
+        var rawData = tw.utils.deserializeTx.deserializeTransaction(contractType, rawDataHex);
+        if (!rawData) throw new Error("Could not read the transaction returned by the route service");
+        var ref = await refBlockParams();
+        Object.assign(rawData, ref);
+        // ⚠️ ref already carries ref_block_bytes / ref_block_hash / expiration / timestamp,
+        // anchored ~60s behind the head — see refBlockParams() for why the head is fatal.
+        // Nothing in the calldata depends on the txID, so re-anchoring is safe.
+        return await tw.transactionBuilder.newTxID(
+          { visible: false, txID: "", raw_data: rawData, raw_data_hex: "" },
+          { txLocal: true }
+        );
+      }
+      async function signWithWallet(transaction) {
+        // MetaMask has no tronWeb to hand us — it signs over the CAIP bridge and returns a
+        // bare signature, which mmSign() attaches. The re-anchored raw_data_hex built above
+        // is what gets signed either way, so the TAPOS rule (3) still holds on this path.
+        if (useMultichain) return await mmSign(transaction);
+        var itw = provider.tronWeb || window.tronWeb;
+        if (!itw || !itw.trx || !itw.trx.sign)
+          throw new Error("no-tronlink: " + (walletName || "the wallet") + " exposed no signer on this page.");
+        return await itw.trx.sign(transaction);
+      }
+      // Tron returns its error text HEX-ENCODED, so the one field that says what actually
+      // went wrong is unreadable unless it is decoded.
+      function tronMsg(m) {
+        var h = String(m || "");
+        if (!/^[0-9a-f]+$/i.test(h) || h.length % 2) return h;
+        var out = "";
+        try { for (var i = 0; i < h.length; i += 2) out += String.fromCharCode(parseInt(h.substr(i, 2), 16)); }
+        catch (e) { return h; }
+        return /[\x20-\x7e]/.test(out) ? out : h;
+      }
+      // ⛔ VERIFY THE SIGNATURE BEFORE SPENDING A BROADCAST ON IT. Fix one stops the ONLY
+      // known cause; this catches the class. A user who leaves the prompt open past the
+      // expiry, or any future wallet that rewrites the payload, produces a signature over a
+      // different digest — and the ONLY way to know is to recover the signer locally and
+      // compare. Costs one elliptic-curve operation and no network call.
+      // ⚠️ The refused signature cannot be salvaged: the snap never returns the payload it
+      // actually signed, so there is nothing to rebuild from. Re-anchoring and re-asking is
+      // the only recovery, which is why this throws rather than trying to repair anything.
+      function verifySigner(tx) {
+        try {
+          var sig = tx && tx.signature && tx.signature[0];
+          if (!sig || !account) return "";                 // nothing to check against
+          var hex = tw.utils.crypto.ecRecover(tx.txID, String(sig).replace(/^0x/i, ""));
+          return tw.address.fromHex(hex) || "";
+        } catch (e) { return ""; }                          // unavailable = do not block
+      }
+      async function broadcast(signed) {
+        // ⛔ ONLY A POSITIVE MISMATCH BLOCKS. If recovery is unavailable we proceed and let
+        // the node decide — the same three-valued rule as every other check on this page.
+        var who = verifySigner(signed);
+        if (who && who !== account) {
+          setDbg("signer mismatch: signed by " + who.slice(0, 6) + "… not " + account.slice(0, 6) + "…");
+          throw new Error("signer-mismatch: the wallet signed a different transaction than the one prepared"
+                          + " (signed by " + who + ", expected " + account + ")");
+        }
+        var r = await tw.trx.sendRawTransaction(signed);
+        // 🔴 THIS REPORTED A REJECTED TRANSACTION AS A SUBMITTED ONE (2026-08-14).
+        // The owner's first real Tron swap showed "Swap submitted", a View-transaction link
+        // that Tronscan answered with "transaction not found", and /v1/status 404 for ever.
+        // ⛔ THE CHECK WAS `r.result === false`, AND A TRON REJECTION HAS NO `result` FIELD.
+        // `wallet/broadcasttransaction` answers `{"result":true}` on success and
+        // `{"code":"SIGERROR","txid":"…","message":"<hex>"}` on failure — so `=== false` was
+        // never true, nothing threw, and the locally computed txID was returned as if it had
+        // been accepted. TronWeb cannot save us either: sendRawTransaction does NOT throw on
+        // a node-level rejection, it spreads the response and adds `transaction`.
+        // ⛔ INFERRING SUCCESS FROM THE ABSENCE OF A KNOWN FAILURE IS THE SAME MISTAKE AS
+        // ensureChain's swallowed catch: silence meant "proceed", and proceeding was the
+        // dangerous branch. REQUIRE POSITIVE CONFIRMATION.
+        // ⚠️ It also wrote a swap_logs row marked success for a swap that never happened.
+        var code = String((r && r.code) || "");
+        var dup  = /DUP_TRANSACTION/i.test(code);          // already in the mempool = success
+        if (!(r && (r.result === true || dup))) {
+          var why = tronMsg(r && r.message);
+          setDbg("broadcast refused: " + (code || "no result") + (why ? " · " + why : ""));
+          throw new Error("broadcast-refused: " + (code || "the node did not confirm this transaction")
+                          + (why ? " · " + why : ""));
+        }
+        // ⚠️ `txid` LOWERCASE on the broadcast result, `txID` on the transaction object.
+        // On DUP the node omits its own id, so the locally computed one is all there is.
+        var id = (r && r.txid) || (signed && signed.txID) || "";
+        return String(id).replace(/^0x/i, "");
+      }
+
+      // ── TRC-20 ALLOWANCE ──────────────────────────────────────────────────────
+      // ⛔ A TRC-20 SPEND NEEDS A SEPARATE, SEPARATELY-SIGNED approve — Tron has no way to
+      // batch it with the swap. That is TWO wallet prompts, which brushes against the
+      // one-approval rule, so the count is stated on screen BEFORE the first prompt rather
+      // than discovered between them. Owner decision 2026-08-14.
+      var DEFAULT_APPROVE_FEE_LIMIT = 100000000;   // 100 TRX, matching Li.Fi's own default
+      async function allowanceOf(token, spender) {
+        try {
+          var c = await tw.contract().at(token);
+          var a = await c.allowance(account, spender).call({ from: account });
+          return BigInt(a && a.toString ? a.toString() : a || 0);
+        } catch (e) { return null; }        // unknown, NOT zero — callers must not assume
+      }
+      async function approveIfNeeded(q, amountBase) {
+        var token = P.ftok, spender = q.estimate && q.estimate.approvalAddress;
+        if (!token || token === TRX_NATIVE || !spender) return false;
+        var have = await allowanceOf(token, spender);
+        if (have !== null && have >= BigInt(amountBase)) return false;
+        show("Approve " + P.fsym + " first",
+             "Tron needs a separate approval before the swap can move your " + P.fsym
+             + ". This is <b>1 of 2</b> prompts — the swap itself follows.", "", true);
+        var feeLimit = DEFAULT_APPROVE_FEE_LIMIT;
+        try {
+          var gc = (q.estimate && q.estimate.gasCosts) || [];
+          for (var i = 0; i < gc.length; i++) {
+            if (String(gc[i].type || "").toUpperCase() === "APPROVE" && gc[i].amount) {
+              var n = Number(gc[i].amount); if (isFinite(n) && n > 0) feeLimit = n;
+            }
+          }
+        } catch (e) {}
+        var built = await tw.transactionBuilder.triggerSmartContract(
+          token, "approve(address,uint256)", { feeLimit: feeLimit },
+          [{ type: "address", value: spender }, { type: "uint256", value: String(amountBase) }],
+          account
+        );
+        var signed = await signWithWallet(built.transaction);
+        var id = await broadcast(signed);
+        setDbg("approve " + String(id).slice(0, 10) + "…");
+        // The node needs the approval visible before the swap references it.
+        await napOrReturn(3000);
+        return true;
+      }
+
+      // ── PRE-FLIGHT ────────────────────────────────────────────────────────────
+      // ⛔ WARN, NEVER BLOCK ON A GUESS — the same rule as evm.html's gas reserve. fee_limit
+      // is a CAP, not a charge, and typical energy use is far below it, so refusing a swap
+      // unless the wallet holds value + 150 TRX would block almost everyone for no reason.
+      // We block ONLY when the balance cannot cover the amount itself, which is unambiguous;
+      // everything else is stated and left to the user.
+      var _trxFmt = function (v) { return (Number(v) / 1e6).toFixed(6); };
+      function valueSunOf(q) {
+        try { return BigInt((q.transactionRequest && q.transactionRequest.value) || 0); } catch (e) { return 0n; }
+      }
+      async function trxBalance() {
+        try { return BigInt(await tw.trx.getBalance(account)); } catch (e) { return null; }
+      }
+      // ── 🔴 WHAT A TRON SWAP ACTUALLY COSTS (2026-08-15) ───────────────────────────
+      // The owner held 14.56 TRX and swapped 14. The old pre-flight compared the balance
+      // against the AMOUNT ALONE, saw 14.56 ≥ 14, and let it through both wallet prompts.
+      // java-tron then refused it at broadcast:
+      //     CONTRACT_VALIDATE_ERROR · Validate InternalTransfer error, balance is not sufficient
+      // ⛔ THE ORDER IS THE WHOLE POINT. Manager.processTransaction runs consumeBandwidth()
+      // BEFORE trace.exec(), and that burn comes out of the SAME balance the VM then checks:
+      // VMUtils.validateForSmartContract compares `balance < callValue` AFTER the deduction.
+      // So a balance that covers the amount to the last sun is still short by the bandwidth.
+      // ⚠️ BANDWIDTH IS ALL-OR-NOTHING, NOT ADDITIVE. useFreeNet pays only if the WHOLE
+      // transaction fits in what is left of the 600 free bytes/day; otherwise the entire byte
+      // cost is burned. A Li.Fi bridge call is well over 600 bytes, so it is essentially
+      // always burned, and it is never split across the free and staked pools.
+      // ⚠️ ENERGY IS CHARGED AFTER EXECUTION, WHICH IS WHY THE 17.76 TRX METAMASK DISPLAYED
+      // DOES NOT APPEAR IN THAT ERROR. It still has to be affordable:
+      // getAccountEnergyLimitWithFixRatio derives the energy limit from
+      // `max(balance - callValue, 0) / energyPrice`, so an account with nothing left over
+      // gets a limit of zero, burns what it can, and dies OUT_OF_ENERGY having spent it.
+      // ✅ Read out of java-tron `develop`: VMUtils.validateForSmartContract,
+      // Manager.processTransaction, BandwidthProcessor.consume, ReceiptCapsule.payEnergyBill,
+      // VMActuator.getAccountEnergyLimitWithFixRatio. Prices come off the chain, never from
+      // a constant here — getEnergyFee moved 210 → 100 sun in Aug 2025 and will move again.
+      var TRX_ENERGY_PAD  = 1.2;
+      var TRX_BW_OVERHEAD = 133;   // 69-byte signature envelope + MAX_RESULT_SIZE_IN_TX (64)
+      function _trxCallOf(q) {
+        try {
+          var hex = stripHex(q.transactionRequest.data);
+          var ct  = (q.transactionRequest.customData && q.transactionRequest.customData.contractType)
+                    || "TriggerSmartContract";
+          var rd  = tw.utils.deserializeTx.deserializeTransaction(ct, hex);
+          var v   = rd.contract[0].parameter.value;
+          if (!v || !v.contract_address || !v.owner_address) return null;
+          return { v: v, bytes: Math.ceil(hex.length / 2) + TRX_BW_OVERHEAD };
+        } catch (e) { return null; }
+      }
+      // 🔴 ONE try/catch AROUND ALL THREE READS THREW AWAY WHAT IT HAD ALREADY MEASURED
+      // (2026-08-15). A single failing endpoint set known:false, nothing blocked, and the
+      // owner walked into the SAME `Validate InternalTransfer error, balance is not
+      // sufficient` refusal a build later — with the pre-flight sitting right there holding
+      // two of the three figures it needed.
+      // ✅ EACH READ IS INDEPENDENT AND EACH TIER BLOCKS ON WHAT IT ACTUALLY MEASURED:
+      //     bwKnown   → balance must cover amount + bandwidth   (the certain part: java-tron
+      //                 burns bandwidth BEFORE the VM checks the amount)
+      //     known     → …and + energy
+      // Neither measured ⇒ nothing blocks, exactly as before. Losing the energy estimate must
+      // not cost us the bandwidth figure, because bandwidth alone is what refused this swap.
+      // ⚠️ AND `missing` IS REPORTED ON THE DEBUG LINE, so the next screenshot names which
+      // endpoint is unreachable instead of leaving it to be guessed at again.
+      // 🔴 TRONGRID ALLOWS **ONE REQUEST PER SECOND** WITHOUT AN API KEY (2026-08-15).
+      // Reduced 10 → 8 → 6 → 3 → 1 QPS across May–June 2023 and never raised. The cost model
+      // fires four reads back to back — balance, chain params, resources, energy — and the
+      // owner's logs showed exactly the LAST one failing, every time, while the first three
+      // succeeded. That is not a payload problem; it is a queue.
+      // ⛔ AND ONLY A NON-2xx CAN THROW HERE. TronWeb's HttpProvider is a bare
+      // `axios.request(...).then(({data}) => data)`, so every NODE-level failure — bad hex,
+      // missing field, a contract that reverts — comes back as HTTP 200 with an error in the
+      // BODY and resolves happily. A throw therefore means the GATEWAY refused us (403/429),
+      // which is the rate limit. Retrying after a beat is the correct response to that and
+      // the wrong response to nothing else.
+      // ⚠️ ONE RETRY, NOT A LOOP. A page that hammers a rate limiter earns a longer ban.
+      var TRON_RETRY_MS = 1200;   // just over TronGrid's 1 req/s anonymous budget
+      function _nap(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+      async function _read(label, fn, missing) {
+        for (var attempt = 0; attempt < 2; attempt++) {
+          if (attempt) await _nap(TRON_RETRY_MS);
+          try {
+            var r = await fn();
+            if (r) return r;
+            break;                              // answered, but with nothing usable — not a rate limit
+          } catch (e) {}
+        }
+        missing.push(label);
+        return null;
+      }
+      // ⛔ AN HTTP 200 CARRYING AN ERROR IS STILL AN ERROR, AND IT WAS BEING READ AS DATA.
+      // java-tron's TriggerConstantContractServlet catches everything and serialises it into
+      // the body — `{"result":{"code":"CONTRACT_VALIDATE_ERROR","message":"<hex>"}}` or
+      // `{"Error":"…"}` — with no `energy_used`. Without this the page could not tell "the
+      // simulation says no" from "the request never arrived", and both landed in `missing`
+      // with the same label.
+      function _simError(sim) {
+        if (!sim) return "unreachable";
+        if (sim.Error) return tronMsg(String(sim.Error));
+        var m = sim.result && sim.result.message;
+        if (m) return tronMsg(String(m));
+        return "";
+      }
+      async function tronCosts(q) {
+        var out = { known: false, bwKnown: false, needSun: valueSunOf(q),
+                    bwSun: 0, energySun: 0, bareSun: 0, missing: [] };
+        var call = _trxCallOf(q);
+        if (!call) { out.missing.push("calldata"); return out; }
+        out.bytes = call.bytes;
+        // ⚠️ GET, NOT POST. wallet/getchainparameters is a GET in the HTTP API — the POST
+        // form sends a null body and gateways answer with an error, which is the single most
+        // likely reason this whole block came back unknown on the owner's phone. The POST
+        // fallback stays for any node that only accepts that.
+        var prices = await _read("chain-params", async function () {
+          try {
+            var g = await tw.fullNode.request("wallet/getchainparameters", {}, "get");
+            if (g && g.chainParameter) return g;
+          } catch (e) {}
+          return await tw.fullNode.request("wallet/getchainparameters", {}, "post");
+        }, out.missing);
+        var res = await _read("account-resources", function () {
+          return tw.trx.getAccountResources(account);
+        }, out.missing);
+        // ⚠️ `data` NOT function_selector — we have the calldata already and never decode the
+        // ABI. triggerconstantcontract runs the REAL bytecode against current state and
+        // returns the same energy figure that would be billed.
+        // ⚠️ THE SIMULATION REALLY DEBITS call_value AGAINST A STATE SNAPSHOT. VMActuator
+        // runs `if (callValue > 0) MUtil.transfer(...)` even on a CONSTANT call, so an account
+        // that cannot cover the amount gets `Validate InternalTransfer error, balance is not
+        // sufficient` back from the SIMULATION — the very case we are trying to price. That
+        // would leave the user with no energy figure at exactly the moment they need one.
+        // ✅ ON THAT ERROR, RE-RUN WITH call_value 0. The calldata path is what consumes the
+        // energy; dropping the transfer changes the estimate marginally and turns "no figure
+        // at all" into "a figure". Marked as an estimate so nothing downstream over-trusts it.
+        var _simReq = function (cv) {
+          return function () {
+            return tw.fullNode.request("wallet/triggerconstantcontract", {
+              owner_address:    call.v.owner_address,
+              contract_address: call.v.contract_address,
+              data:             call.v.data,
+              call_value:       cv,
+              visible:          false
+            }, "post");
+          };
+        };
+        var sim = await _read("energy-estimate", _simReq(Number(out.needSun)), out.missing);
+        var simErr = _simError(sim);
+        if (sim && simErr && /balance is not sufficient|no OwnerAccount/i.test(simErr)) {
+          out.missing.pop();                                   // it answered; it just could not afford it
+          sim = await _read("energy-estimate", _simReq(0), out.missing);
+          out.simZeroValue = true;
+        } else if (sim && simErr) {
+          // It answered and refused for some other reason — say WHICH, rather than leaving
+          // the debug line reading "unread: energy-estimate" as if nothing had arrived.
+          out.simErr = simErr.slice(0, 80);
+        }
+        var pE = 0, pB = 0, list = (prices && prices.chainParameter) || [];
+        for (var i = 0; i < list.length; i++) {
+          if (list[i].key === "getEnergyFee")      pE = Number(list[i].value) || 0;
+          if (list[i].key === "getTransactionFee") pB = Number(list[i].value) || 0;
+        }
+        if (!res) return out;                       // resources gate BOTH tiers
+        var freeBw   = Math.max(0, (res.freeNetLimit || 0) - (res.freeNetUsed || 0));
+        var stakedBw = Math.max(0, (res.NetLimit     || 0) - (res.NetUsed     || 0));
+        var eAvail   = Math.max(0, (res.EnergyLimit  || 0) - (res.EnergyUsed  || 0));
+        out.eAvail = eAvail;
+        if (pB > 0) {
+          out.bwSun   = (stakedBw >= call.bytes || freeBw >= call.bytes) ? 0 : call.bytes * pB;
+          out.bwKnown = true;
+        }
+        var eUsed = Number(sim && sim.energy_used);
+        if (pE > 0 && isFinite(eUsed) && eUsed > 0) {
+          out.eUsed     = eUsed;
+          out.energySun = Math.max(0, Math.ceil(eUsed * TRX_ENERGY_PAD) - eAvail) * pE;  // shown
+          out.bareSun   = Math.max(0, eUsed - eAvail) * pE;                              // blocked on
+          out.known     = true;
+        }
+        return out;
+      }
+      function _sun(n) { return BigInt(Math.ceil(Number(n) || 0)); }
+      // The HARD gate: the wallet cannot cover what this swap will actually take. The amount
+      // alone is unambiguous and has always blocked; the bandwidth burn is equally certain
+      // (java-tron deducts it first), and the energy shortfall is measured, not guessed.
+      async function preflightBlock(q) {
+        var bal = await trxBalance();
+        if (bal === null) return;                       // read failed: never block on a guess
+        var need = valueSunOf(q);
+        if (need > 0n && bal < need) {
+          throw new Error("trx-balance: this swap moves " + _trxFmt(need) + " TRX but the wallet holds "
+            + _trxFmt(bal) + " TRX. Top up, or swap a smaller amount.");
+        }
+        var c = q._costs;
+        if (!c) return;
+        // ⛔ BLOCK ON WHAT WAS MEASURED, TIER BY TIER. Requiring all three reads meant one
+        // dead endpoint let the owner sign into the node's refusal with the bandwidth figure
+        // already in hand. Bandwidth ALONE is what refused this swap, and bandwidth needs
+        // only two of the three reads.
+        var fees = 0n, parts = [];
+        if (c.bwKnown) { fees += _sun(c.bwSun);   parts.push(_trxFmt(c.bwSun) + " for bandwidth"); }
+        if (c.known)   { fees += _sun(c.bareSun); parts.push(_trxFmt(c.bareSun) + " for energy"); }
+        if (!c.bwKnown && !c.known) return;             // nothing measured: never block on a guess
+        var floor = need + fees;
+        if (bal >= floor) return;
+        // ⛔ SAY WHAT THEY CAN DO, NOT JUST WHAT THEY CANNOT. If the fees alone exceed the
+        // balance there is no smaller amount that works, and saying "swap less" would send
+        // the owner round the loop again — which is exactly what happened here.
+        // 🔴 NEVER NAME A "SWAP AT MOST" FIGURE FROM A PARTIAL COST (2026-08-15).
+        // With the energy estimate unread this said "Swap at most 12.869140 TRX" — and that
+        // swap would have failed too, because the energy it did not measure was ~17 TRX.
+        // Advice derived from half the cost is worse than no advice: it is a specific
+        // instruction that sends the user round the loop with confidence.
+        var whole = c.bwKnown && c.known;
+        var room  = bal - fees;
+        var fix;
+        if (!whole) {
+          fix = "NexVault could only price part of this. Add TRX or stake for energy — a smaller "
+              + "amount may not be enough either, because the part it could not read is not in "
+              + "the figure above.";
+        } else if (room > 0n) {
+          fix = "Swap at most " + _trxFmt(room) + " TRX, or add about " + _trxFmt(floor - bal) + " TRX.";
+        } else {
+          fix = "The network cost alone is more than this account holds, so no smaller amount will "
+              + "work either — add about " + _trxFmt(floor - bal) + " TRX, or stake TRX for energy.";
+        }
+        // ⚠️ AND IT SAYS SO WHEN IT IS ONLY PART OF THE PICTURE — an incomplete figure quoted
+        // as a total is a promise we cannot keep.
+        var caveat = whole ? "" :
+          " (NexVault could not read " + (c.missing || []).join(" and ") + ", so the real cost is higher than this.)";
+        // ⚠️ "about" WHEN EVERYTHING WAS MEASURED, "at least" WHEN IT WAS NOT. Saying
+        // "at least" on a complete figure understates our own confidence; saying "about" on
+        // a partial one overstates it. Both mislead, in opposite directions.
+        throw new Error("trx-balance: this swap needs " + (whole ? "about " : "at least ")
+          + _trxFmt(floor) + " TRX in total — "
+          + _trxFmt(need) + " to swap and " + parts.join(", ")
+          + " — but the wallet holds " + _trxFmt(bal)
+          + " TRX. Nothing was sent. " + fix + caveat);
+      }
+      // ⛔ THIS MUST RUN WHILE THE QUOTE CARD IS ON SCREEN, NOT DURING THE SWAP. show() trims
+      // the card, so a warning appended after the user has tapped Swap is destroyed on the
+      // very next repaint — it would have been written, and never once seen.
+      async function preflightWarn(q) {
+        setDbg("checking balance and network cost…");
+        var bal = await trxBalance();
+        if (bal === null) return;
+        var need = valueSunOf(q);
+        // \u26a0\ufe0f COMPUTED ONCE, HERE, AND REUSED BY preflightBlock. Three reads is enough on a
+        // phone; doing them twice would add a second of dead time in front of the wallet.
+        // The BALANCE is re-read at signing time, because that is the figure that moves.
+        var c = await tronCosts(q);
+        q._costs = c;
+        // ⚠️ NAME THE UNREACHABLE ENDPOINT. Last time this block came back unknown, nothing
+        // on the screen said WHICH read had failed and the cause had to be guessed at.
+        setDbg((c.bwKnown ? "cost · bandwidth " + _trxFmt(c.bwSun) : "cost · bandwidth ?")
+          + (c.known ? " · energy " + _trxFmt(c.bareSun) + " TRX" : " · energy ?")
+          + (c.missing && c.missing.length ? " · unread: " + c.missing.join(",") : "")
+          + (c.simErr ? " · sim: " + c.simErr : "")
+          + (c.simZeroValue ? " · energy priced at call_value 0" : ""));
+        if (!c.bwKnown && !c.known) {
+          // \u26d4 THE OLD WARNING QUOTED THE FEE **CAP** (150 TRX), which is not a charge and
+          // frightened people about a number they would never pay. Without live figures, say
+          // only what is true.
+          addWarn("<b>Tron charges for the attempt, not just the result.</b> NexVault could not read "
+            + "this account's bandwidth and energy just now, so it cannot tell you the exact cost. "
+            + "Your wallet holds " + _trxFmt(bal) + " TRX. Leave a little spare on top of the amount "
+            + "you are swapping \u2014 staking TRX for energy avoids the burn entirely.");
+          return;
+        }
+        var whole = c.bwKnown && c.known;
+        var floor = need + (c.bwKnown ? _sun(c.bwSun) : 0n) + (c.known ? _sun(c.bareSun) : 0n);
+        var full  = need + (c.bwKnown ? _sun(c.bwSun) : 0n) + (c.known ? _sun(c.energySun) : 0n);
+        if (bal < floor) {
+          var room = bal - (c.bwKnown ? _sun(c.bwSun) : 0n) - (c.known ? _sun(c.bareSun) : 0n);
+          // ⛔ SAME RULE AS preflightBlock: NO "swap at most" FIGURE FROM A PARTIAL COST.
+          // It read "Swap at most 12.869140 TRX" with the energy estimate unread — and that
+          // swap would have failed too, on the ~17 TRX it had not measured.
+          addWarn("<b>This account cannot cover this swap.</b> It needs "
+            + (whole ? "about " : "at least ") + _trxFmt(floor)
+            + " TRX — " + _trxFmt(need) + " to swap"
+            + (c.bwKnown ? ", " + _trxFmt(c.bwSun) + " for bandwidth" : "")
+            + (c.known ? " and " + _trxFmt(c.bareSun) + " for energy" : "")
+            + " — and it holds " + _trxFmt(bal) + " TRX. "
+            + (!whole
+                ? "NexVault could not read " + (c.missing || []).join(" and ")
+                  + ", so the real cost is higher than this and a smaller amount may not be enough either."
+                : room > 0n ? "Swap at most " + _trxFmt(room) + " TRX instead."
+                            : "The network cost alone is more than the balance, so no smaller amount "
+                              + "works either. Add TRX, or stake for energy."));
+        } else if (bal < full) {
+          addWarn("<b>This is close.</b> The swap needs about " + _trxFmt(floor) + " TRX and the account "
+            + "holds " + _trxFmt(bal) + " TRX. Tron prices energy on the state at the moment it runs, so "
+            + "a busier block could push it past what is here and the attempt would still be charged. "
+            + "Leaving " + _trxFmt(full) + " TRX in the account makes it safe.");
+        } else if (c.bwSun > 0 || c.bareSun > 0) {
+          addWarn("<b>Network cost:</b> about " + _trxFmt(_sun(c.bwSun) + _sun(c.bareSun))
+            + " TRX on top of the " + _trxFmt(need) + " TRX being swapped \u2014 "
+            + _trxFmt(c.bwSun) + " bandwidth, " + _trxFmt(c.bareSun) + " energy. Tron charges for the "
+            + "attempt, not just the result; staking TRX for energy avoids the burn entirely.");
+        }
+      }
+
+      // ── QUOTE CARD ────────────────────────────────────────────────────────────
+      function fmt(n, d) {
+        var v = Number(n) / Math.pow(10, d);
+        if (!isFinite(v)) return "—";
+        return v < 1 ? v.toFixed(6).replace(/0+$/, "").replace(/\.$/, "") : v.toFixed(4);
+      }
+      async function renderQuote(q) {
+        var est = q.estimate || {};
+        var recvDec = (q.action && q.action.toToken && q.action.toToken.decimals);
+        var recv = (est.toAmount != null && recvDec != null) ? fmt(est.toAmount, recvDec) : "—";
+        var tool = q.tool || (q.toolDetails && q.toolDetails.key) || "Li.Fi";
+        show("Ready to swap",
+             "Review the details, then approve in TronLink.", "", false);
+
+        var box = document.createElement("div");
+        box.className = "quote";
+        box.innerHTML =
+            row("You pay",  P.amt + " " + P.fsym)
+          + row("You get",  "<span class='quote-recv'>" + recv + " " + P.tsym + "</span>")
+          + row("On",       P.toName)
+          + row("Route",    tool)
+          + row("Fee",      "0.5% NexVault");
+        elCard.appendChild(box);
+        function row(k, v) { return "<div class='quote-row'><span class='k'>" + k + "</span><span class='v'>" + v + "</span></div>"; }
+
+        var isTrc20 = P.ftok && P.ftok !== TRX_NATIVE;
+        if (isTrc20) {
+          addWarn("Tron cannot bundle an approval with a swap, so this will ask you to sign "
+            + "<b>twice</b>: once to approve " + P.fsym + ", once for the swap itself. "
+            + "If you have approved enough before, only the swap prompt appears.");
+        }
+        // Warnings BEFORE the button — a caution the user meets after committing is not a
+        // caution. ⚠️ awaited, so the card is complete before "Swap now" can be tapped.
+        await preflightWarn(q);
+        var btn = addButton("Swap now", function () { btn.disabled = true; doSwap(q); });
+        addTgButton(true, "Cancel and go back");
+      }
+
+      // ── THE SWAP ──────────────────────────────────────────────────────────────
+      async function doSwap(q) {
+        try {
+          var txReq = q.transactionRequest;
+          setDbg("re-checking your balance…");
+          await preflightBlock(q);
+
+          var amountBase = toBaseUnits(P.amt, q._fromDec);
+          await approveIfNeeded(q, amountBase);
+
+          show("Confirm the swap", "Approve the transaction in TronLink.", "", true);
+          // ⛔ REBUILD IMMEDIATELY BEFORE SIGNING. A Tron transaction carries an expiration
+          // (~60s) and TAPOS fields tied to a recent block; the user may have spent a minute
+          // on the approval prompt. Building here, not at quote time, is what keeps it valid.
+          setDbg("building the transaction…");
+          var signable = await buildSignable(txReq);
+          recSet({ phase: "in_flight", tool: (q.tool || ""), tdec: (q.action && q.action.toToken && q.action.toToken.decimals) });
+          var signed = await signWithWallet(signable);
+          setDbg("sending it to the Tron network…");
+          var txHash = await broadcast(signed);
+          recSet({ phase: "submitted", txHash: txHash });
+          recordHopTx(txHash);
+          recSet({
+            to_wallet: (function () { try { return destAddress(); } catch (e) { return ""; } })(),
+            // 🔴 LI.FI'S toAmount IS IN BASE UNITS, AND IT WAS LOGGED RAW (2026-08-15).
+            // The owner's TRX → POL row read "62059508725513502720.0000 POL". That is
+            // 62.0595 POL — the quote was right, the decimals were never applied, and the
+            // number that reached the dashboard was meaningless.
+            // ⚠️ evm.html HAS ALWAYS CONVERTED (its rows read 4.3447 and 6.0353). trx.html
+            // was the odd one out, so only Tron rows are wrong.
+            // ⛔ NO DECIMALS ⇒ NO NUMBER. Guessing 18 would write a plausible wrong figure,
+            // which is worse than a blank: a blank is visibly missing.
+            to_amount: (function () {
+              try {
+                var raw = q.estimate && q.estimate.toAmount;
+                var d   = q.action && q.action.toToken && q.action.toToken.decimals;
+                if (raw == null || raw === "" || d == null) return "";
+                return String(Number(raw) / Math.pow(10, d));
+              } catch (e) { return ""; }
+            })(),
+            aggregator: (q.tool || "Li.Fi"),
+            nexvault_fee_usd: nvFeeUsd(q), aggregator_fee_usd: aggFeeUsd(q)
+          });
+          logRetryFromRecord();
+          await trackSwap(txHash, recGet() && recGet().tool, recGet() && recGet().tdec);
+        } catch (e) {
+          logFail((e && e.message) || e, (recGet() && recGet().txHash) || "");
+          // ⛔ NEVER OFFER TO RE-SEND A SWAP THAT IS ALREADY BROADCAST. Everything after
+          // broadcast() resolves lands in this same catch.
+          var _r = recGet();
+          if (_r && (_r.phase === "submitted" || _r.phase === "done" || _r.phase === "failed")) {
+            var again = function () {
+              trackSwap(_r.txHash, _r.tool, _r.tdec, true).catch(function (e2) { showError((e2 && e2.message) || e2, again); });
+            };
+            showError((e && e.message) || e, again);
+          } else {
+            showError((e && e.message) || e, function () { start(); });
+          }
+        }
+      }
+
+      // ── TRACKING ──────────────────────────────────────────────────────────────
+      // Same shape as evm.html after the 2026-08-09 wedge: every poll has its own timeout,
+      // the budget is VISIBLE time with a per-run baseline, returning to the page re-polls
+      // at once, and HTTP 404 counts as "not indexed yet".
+      // ⛔ THE TXID GOES IN BARE. Li.Fi's own SDK strips any 0x before calling /status, and
+      // a Tron txid never has one to begin with.
+      function renderDone(got, recvTx, txHash) {
+        // ⚠️ NAMES THE REAL TOKEN — POL, not the goal. Claiming XPL here would be a lie
+        // about what is in the wallet, and the whole point of the second step would be
+        // invisible. The next line tells them what remains.
+        show("Received " + (got ? got + " " + P.tsym : P.tsym) + " ✅",
+             (got ? (got + " " + P.tsym + " has arrived in your wallet on " + P.toName + ".")
+                  : ("Your " + P.tsym + " has arrived on " + P.toName + "."))
+             + (P.step === "1"
+                 ? " That was step 1 of 2 — go back to NexVault and tap Finish step 2 to swap it to "
+                   + P.gsym + "."
+                 : ""),
+             "ok", false);
+        if (isTronTxId(txHash)) addLink("View transaction", explorerTx(TRON_CHAIN_ID, txHash));
+        if (recvTx) addLink("View on destination chain", explorerTx(Number(P.to), recvTx));
+        addTgButton(false, "Back to NexVault");
+      }
+      function renderFailed(txHash) {
+        show("Swap failed", "The bridge reported a failure. Your funds are usually returned automatically — check the transaction for details.", "err", false);
+        if (isTronTxId(txHash)) addLink("View transaction", explorerTx(TRON_CHAIN_ID, txHash));
+        addTgButton(false, "Back to NexVault");
+      }
+      function addCheckAgain(txHash, tool, tdec) {
+        addButton("Check again now", function () {
+          trackSwap(txHash, tool, tdec, true).catch(function (e) { showError((e && e.message) || e, null); });
+        }, true);
+      }
+      var _tracking = false;
+      async function trackSwap(txHash, tool, tdec, resuming) {
+        if (_tracking) return;
+        _tracking = true;
+        try { await trackSwapInner(txHash, tool, tdec, resuming); }
+        finally { _tracking = false; }
+      }
+      async function trackSwapInner(txHash, tool, tdec, resuming) {
+        try { console.log("[NexVault TRX] swap tx", txHash); } catch (e) {}
+        var head = resuming ? "Checking your swap…" : "Swap submitted";
+        function pollLine(s) {
+          try { var el = document.getElementById("nvpoll"); if (el) el.textContent = s; } catch (e) {}
+        }
+        show(head,
+             (P.step === "1" ? "Step 1 of 2 — confirming on Tron, then bridging to " + P.tsym
+                             : "Confirming on Tron, then bridging to " + P.tsym)
+           + ". This usually takes a few minutes — you can leave this page open.<br>"
+           + "<span id=\"nvpoll\" style=\"opacity:.72\"></span>", "", true);
+        pollLine("Asking the bridge tracker…");
+        if (isTronTxId(txHash)) addLink("View transaction", explorerTx(TRON_CHAIN_ID, txHash));
+
+        var _final = null, _lastStatus = "", _polls = 0;
+        var _bridge = tool || "";
+        var _nfSince = -1;
+        var VIS_BASE   = visMs();
+        var VIS_BUDGET = 10 * 60 * 1000;
+        var HARD_CAP   = Date.now() + 6 * 60 * 60 * 1000;
+        var NF_GIVE_UP = 6 * 60 * 1000;
+        var wait = 4000;
+
+        while ((visMs() - VIS_BASE) < VIS_BUDGET && Date.now() < HARD_CAP) {
+          _polls++;
+          var note = "";
+          try {
+            var su = "https://li.quest/v1/status?txHash=" + encodeURIComponent(txHash)
+                   + "&fromChain=" + encodeURIComponent(TRON_CHAIN_ID) + "&toChain=" + encodeURIComponent(P.to)
+                   + (_bridge ? "&bridge=" + encodeURIComponent(_bridge) : "");
+            var sr = await fetchT(su, null, 15000);
+            if (!sr.ok) {
+              note = "HTTP " + sr.status;
+              if (sr.status === 400 && _bridge) { _bridge = ""; note += " · dropping the bridge hint"; wait = 800; }
+              else if (sr.status === 404) { _lastStatus = "NOT_FOUND"; if (_nfSince < 0) _nfSince = visMs(); wait = 4000; }
+              else if (sr.status === 429) { wait = Math.min(wait * 2, 30000); }
+              else { wait = 4000; }
+            } else {
+              wait = 4000;
+              var sj = await sr.json();
+              _lastStatus = (sj && sj.status) || "";
+              if (_lastStatus === "NOT_FOUND" || _lastStatus === "INVALID") { if (_nfSince < 0) _nfSince = visMs(); }
+              else _nfSince = -1;
+              if (sj && (_lastStatus === "DONE" || _lastStatus === "FAILED")) { _final = sj; break; }
+            }
+          } catch (e) {
+            note = ((e && e.message) === "status-timeout") ? "timed out · retrying" : "network hiccup · retrying";
+          }
+          var line = "Checked " + _polls + (_polls === 1 ? " time · " : " times · ")
+                   + (note || ("bridge says " + (_lastStatus || "pending").toLowerCase()));
+          pollLine(line);
+          try { setDbg("status " + (_lastStatus || "-") + " · " + _polls + (note ? " · " + note : "")); } catch (e) {}
+          if (_nfSince >= 0 && (visMs() - _nfSince) >= NF_GIVE_UP) break;
+          await napOrReturn(wait);
+        }
+
+        if (_final && _final.status === "DONE") {
+          var got = null;
+          try {
+            var rc2 = _final.receiving;
+            var _d = (rc2 && rc2.token && rc2.token.decimals);
+            if (_d == null) _d = tdec;
+            if (rc2 && rc2.amount && _d != null) got = (Number(rc2.amount) / Math.pow(10, _d)).toFixed(6);
+          } catch (e) {}
+          var recvTx = (_final.receiving && _final.receiving.txHash) || "";
+          recSet({ phase: "done", got: got || "", recvTx: recvTx });
+          renderDone(got, recvTx, txHash);
+        } else if (_final && _final.status === "FAILED") {
+          recSet({ phase: "failed" });
+          logFail("bridge reported FAILED", txHash);
+          renderFailed(txHash);
+        } else if (_nfSince >= 0) {
+          show("Submitted — can't track it here",
+               "Your transaction was sent, but the bridge tracker hasn't picked it up. This does NOT mean it failed. Open the transaction below to see its real state; do not send it again.",
+               "", false);
+          if (isTronTxId(txHash)) addLink("View transaction", explorerTx(TRON_CHAIN_ID, txHash));
+          addCheckAgain(txHash, tool, tdec);
+          addTgButton(false, "Back to NexVault");
+        } else {
+          show("Still bridging", "Your swap is confirmed on Tron and still in transit. This can take longer at busy times — it will arrive without any further action from you. Use the link above to track it.", "", false);
+          if (isTronTxId(txHash)) addLink("View transaction", explorerTx(TRON_CHAIN_ID, txHash));
+          addCheckAgain(txHash, tool, tdec);
+          addTgButton(false, "Back to NexVault");
+        }
+      }
+
+      // ── RESUME ────────────────────────────────────────────────────────────────
+      // ⛔ A RECORDED OUTCOME IS DRAWN FROM THE RECORD, NEVER RE-FETCHED.
+      function addNewSwapEscape() {
+        var armed = false;
+        var b = addButton("Start this swap again", function () {
+          if (!armed) {
+            armed = true;
+            b.textContent = "Tap again — only if the first one did NOT go through";
+            b.className = "btn";
+            setTimeout(function () { if (armed) { armed = false; b.textContent = "Start this swap again"; b.className = "btn secondary"; } }, 6000);
+            return;
+          }
+          recClear(); start();
+        }, true);
+      }
+      function resumeIfAlreadySwapped() {
+        var r = recGet();
+        if (!r || !r.phase) return false;
+        if (r.phase === "done")   { renderDone(r.got || null, r.recvTx || "", r.txHash); addNewSwapEscape(); return true; }
+        if (r.phase === "failed") { renderFailed(r.txHash); addNewSwapEscape(); return true; }
+        if (r.phase === "submitted") {
+          var retrack = function () {
+            trackSwap(r.txHash, r.tool, r.tdec, true).catch(function (e) { showError((e && e.message) || e, retrack); });
+          };
+          retrack();
+          addNewSwapEscape();
+          return true;
+        }
+        if (r.phase === "in_flight") {
+          show("This swap was already started",
+               "A transaction for this swap was sent to TronLink and we didn't get its id back — it may already be on chain. <b>Check your wallet or Tronscan before trying again.</b> Sending it twice would swap twice.",
+               "err", false);
+          addTgButton(false, "Back to NexVault");
+          addNewSwapEscape();
+          return true;
+        }
+        return false;
+      }
+
+      // ── ENTRY ─────────────────────────────────────────────────────────────────
+      async function start() {
+        try {
+          show("Loading", "Preparing the Tron connection.", "", true);
+          if (!TronWebCtor) TronWebCtor = await loadTronWeb();
+          if (!tw) {
+            var _host = TRON_RPCS[0], _hdrs = tronHeaders(_host);
+            tw = _hdrs
+              ? new TronWebCtor({ fullHost: _host, headers: _hdrs })
+              : new TronWebCtor({ fullHost: _host });
+          }
+          await connect();
+          // ⛔ THE HEADLINE IS THE USER'S SWAP, NOT THIS LEG. On a two-hop the goal token
+          // is carried in `gsym`; the leg is stated underneath so the POL figures below
+          // still make sense.
+          elSub.textContent = P.fsym + " → " + (P.gsym || P.tsym)
+            + (P.step === "1" ? "   ·   Step 1 of 2 · via " + P.toName : "");
+          show("Getting the best route", "Asking Li.Fi for a quote on this swap.", "", true);
+          var q = await getLifi();
+          await renderQuote(q);
+        } catch (e) {
+          showError((e && e.message) || e, function () { start(); });
+        }
+      }
+
+      if (!P.to || !P.ftok || !P.ttok || !P.amt) {
+        show("Nothing to swap", "This page was opened without swap details. Return to NexVault and start again.", "err", false);
+        addTgButton(false, "Back to NexVault");
+      } else {
+        try { logRetryFromRecord(); } catch (e) {}
+        if (!resumeIfAlreadySwapped()) start();
+      }
+    </script>
+  </body>
+</html>
